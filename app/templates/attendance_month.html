@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Monthly Attendance</h2>
+<form method="get" class="inline-form">
+  <label>Year <input name="year" type="number" value="{{ year }}" /></label>
+  <label>Month <input name="month" type="number" value="{{ month }}" min="1" max="12" /></label>
+  <label>Therapist
+    <select name="therapist_id"><option value="">All</option>{% for t in therapists %}<option value="{{t.id}}">{{t.name}}</option>{% endfor %}</select>
+  </label>
+  <label>Student
+    <select name="student_id"><option value="">All</option>{% for s in students %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}</select>
+  </label>
+  <button>Filter</button>
+</form>
+<form method="post">
+  <input type="hidden" name="action" value="generate" />
+  <input type="hidden" name="year" value="{{ year }}" />
+  <input type="hidden" name="month" value="{{ month }}" />
+  <button>Generate Month Sessions</button>
+</form>
+<table>
+  <tr><th>Date</th><th>Sessions</th></tr>
+  {% for day, rows in sessions.items() %}
+  <tr>
+    <td>{{ day }}</td>
+    <td>
+      {% for s in rows %}
+      <div class="session">
+        <strong>{{ s.start_time.strftime('%H:%M') }}</strong>
+        <a href="{{ url_for('web.student_profile', student_id=s.student_id) }}">{{ s.student.name }}</a> / <a href="{{ url_for('web.therapist_profile', therapist_id=s.therapist_id) }}">{{ s.therapist.name }}</a> / {{ s.status }}
+        <form method="post" action="{{ url_for('web.session_status', session_id=s.id) }}" class="inline-form">
+          <select name="status">
+            {% for st in ['Present','Absent','Cancelled','Make-up','Rescheduled','No Show'] %}
+            <option value="{{st}}" {% if st==s.status %}selected{% endif %}>{{st}}</option>
+            {% endfor %}
+          </select>
+          <button>Update</button>
+        </form>
+      </div>
+      {% endfor %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

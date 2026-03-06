@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Therapy Center System</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+</head>
+<body>
+<header>
+  <h1>Therapy Center Operations</h1>
+  <nav>
+    <a href="{{ url_for('web.dashboard') }}">Dashboard</a>
+    <a href="{{ url_for('web.attendance_month') }}">Attendance</a>
+    <a href="{{ url_for('web.daily_schedule') }}">Daily Schedule</a>
+    <a href="{{ url_for('web.makeup_editor') }}">Make-up Editor</a>
+    <a href="{{ url_for('web.admin_attendance_page') }}">Admin Attendance</a>
+    <a href="{{ url_for('web.billing_page') }}">Billing</a>
+    <a href="{{ url_for('web.payments_page') }}">Payments</a>
+    <a href="{{ url_for('web.import_page') }}">Import</a>
+    <a href="{{ url_for('web.export_reports_page') }}">Export Reports</a>
+    <a href="{{ url_for('web.weekly_reports') }}">Weekly Reports</a>
+  </nav>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <p class="flash {{ category }}">{{ message }}</p>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
