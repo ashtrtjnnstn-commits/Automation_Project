@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Billing Generator</h2>
+<form method="post">
+  <label>Start Date <input type="date" name="start_date" required /></label>
+  <label>End Date <input type="date" name="end_date" required /></label>
+  <button>Generate 15-day Billing</button>
+</form>
+<h3>Recent Cycles</h3>
+<ul>
+{% for c in cycles %}
+<li>{{ c.start_date }} to {{ c.end_date }} (Due {{ c.due_date }}) - {{ c.billing_advices|length }} advices</li>
+{% else %}<li>No cycles yet.</li>{% endfor %}
+</ul>
+{% endblock %}

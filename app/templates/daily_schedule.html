@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Daily Schedule</h2>
+<form method="get" class="inline-form">
+  <label>Date <input type="date" name="date" value="{{ selected }}" /></label>
+  <button>Load</button>
+</form>
+<table>
+  <tr><th>Time</th><th>Student</th><th>Therapist</th><th>Status</th><th>Type</th></tr>
+  {% for s in sessions %}
+    <tr>
+      <td>{{ s.start_time.strftime('%H:%M') }} - {{ s.end_time.strftime('%H:%M') }}</td>
+      <td><a href="{{ url_for('web.student_profile', student_id=s.student_id) }}">{{ s.student.name }}</a></td>
+      <td><a href="{{ url_for('web.therapist_profile', therapist_id=s.therapist_id) }}">{{ s.therapist.name }}</a></td>
+      <td>{{ s.status }}</td>
+      <td>{{ s.session_type }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5">No sessions on selected date.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Import Students and Schedules</h2>
+<p>Expected columns: Student Name, Therapist, Day, Start Time, Duration Hours, Contract Hours</p>
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="file" accept=".xlsx" required />
+  <button>Import Excel</button>
+</form>
+{% endblock %}
