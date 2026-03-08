@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Export Reports</h2>
+<ul>
+  <li><a href="{{ url_for('web.export_page', kind='attendance') }}">Attendance Summary</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='admin') }}">Admin Attendance</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='therapist-weekly') }}">Therapist Weekly Hours</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='billing') }}">Billing Advice</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='payments') }}">Payment Ledger</a></li>
+</ul>
+{% endblock %}
