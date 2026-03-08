@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime, date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
 from app.models import (
     AdminAttendance,
-    AdminStaff,
     AttendanceSession,
     BillingAdvice,
     Payment,
@@ -21,22 +20,14 @@ from app.services.attendance_service import weekly_therapist_hours
 DAY_MAP = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
 
 
-def _sheet_header(ws) -> list[str]:
-    return [str(c.value).strip() if c.value else "" for c in ws[1]]
-
-
-def _validate_columns(header: list[str], mapped: dict[str, str]) -> dict[str, int]:
-    missing = [sheet_col for sheet_col in mapped.values() if sheet_col not in header]
-    if missing:
-        raise ValueError(f"Missing required columns: {', '.join(missing)}")
-    return {k: header.index(v) for k, v in mapped.items()}
-
-
 def import_students_and_schedules(path: str, column_map: dict[str, str] | None = None) -> int:
-    """Import students and regular schedules from a single worksheet."""
+    """Import students and regular schedules from a single worksheet.
+
+    Raises ValueError when required columns are missing.
+    """
     wb = load_workbook(path)
     ws = wb.active
-    header = _sheet_header(ws)
+    header = [str(c.value).strip() if c.value else "" for c in ws[1]]
     mapped = column_map or {
         "student_name": "Student Name",
         "therapist_name": "Therapist",
@@ -45,8 +36,12 @@ def import_students_and_schedules(path: str, column_map: dict[str, str] | None =
         "duration_hours": "Duration Hours",
         "contract_hours": "Contract Hours",
     }
-    index = _validate_columns(header, mapped)
 
+    missing = [sheet_col for sheet_col in mapped.values() if sheet_col not in header]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
+    index = {k: header.index(v) for k, v in mapped.items()}
     inserted = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row[index["student_name"]]:
@@ -85,60 +80,8 @@ def import_students_and_schedules(path: str, column_map: dict[str, str] | None =
     return inserted
 
 
-def import_admin_staff(path: str, column_map: dict[str, str] | None = None) -> int:
-    wb = load_workbook(path)
-    ws = wb.active
-    header = _sheet_header(ws)
-    mapped = column_map or {"name": "Admin Name", "active": "Active"}
-    index = _validate_columns(header, mapped)
-
-    inserted = 0
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row[index["name"]]:
-            continue
-        name = str(row[index["name"]]).strip()
-        existing = AdminStaff.query.filter_by(name=name).first()
-        if existing:
-            continue
-        active_raw = str(row[index["active"]]).strip().lower()
-        active = active_raw in {"1", "true", "yes", "y", "active"}
-        db.session.add(AdminStaff(name=name, active=active))
-        inserted += 1
-    db.session.commit()
-    return inserted
-
-
-def import_therapists(path: str, column_map: dict[str, str] | None = None) -> int:
-    wb = load_workbook(path)
-    ws = wb.active
-    header = _sheet_header(ws)
-    mapped = column_map or {"name": "Therapist Name", "active": "Active"}
-    index = _validate_columns(header, mapped)
-
-    inserted = 0
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row[index["name"]]:
-            continue
-        name = str(row[index["name"]]).strip()
-        existing = Therapist.query.filter_by(name=name).first()
-        if existing:
-            continue
-        active_raw = str(row[index["active"]]).strip().lower()
-        active = active_raw in {"1", "true", "yes", "y", "active"}
-        db.session.add(Therapist(name=name, active=active))
-        inserted += 1
-    db.session.commit()
-    return inserted
-
-
-def _save_workbook(wb: Workbook, path: str) -> str:
-    target = Path(path).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(target))
-    return str(target)
-
-
 def export_attendance_summary(path: str) -> str:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Attendance"
@@ -153,20 +96,24 @@ def export_attendance_summary(path: str) -> str:
             s.status,
             s.source_type,
         ])
-    return _save_workbook(wb, path)
+    wb.save(path)
+    return path
 
 
 def export_admin_attendance(path: str) -> str:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Admin Attendance"
     ws.append(["Date", "Admin", "Status", "Shift", "Hours"])
     for a in AdminAttendance.query.order_by(AdminAttendance.attendance_date).all():
         ws.append([a.attendance_date.isoformat(), a.admin.name, a.status, a.shift_label, a.hours_worked])
-    return _save_workbook(wb, path)
+    wb.save(path)
+    return path
 
 
 def export_therapist_weekly_hours(path: str, start_date: date, end_date: date) -> str:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Therapist Weekly Hours"
@@ -175,10 +122,12 @@ def export_therapist_weekly_hours(path: str, start_date: date, end_date: date) -
     for therapist_id, hours in totals.items():
         therapist = Therapist.query.get(therapist_id)
         ws.append([start_date.isoformat(), end_date.isoformat(), therapist.name if therapist else therapist_id, hours])
-    return _save_workbook(wb, path)
+    wb.save(path)
+    return path
 
 
 def export_billing_advices(path: str) -> str:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Billing Advice"
@@ -198,10 +147,12 @@ def export_billing_advices(path: str) -> str:
             advice.total_due,
             advice.status,
         ])
-    return _save_workbook(wb, path)
+    wb.save(path)
+    return path
 
 
 def export_payment_ledger(path: str) -> str:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "Payments"
@@ -221,4 +172,5 @@ def export_payment_ledger(path: str) -> str:
                 ])
         else:
             ws.append([p.id, p.payment_date.isoformat(), p.student.name, p.amount, "", 0, "", p.notes])
-    return _save_workbook(wb, path)
+    wb.save(path)
+    return path

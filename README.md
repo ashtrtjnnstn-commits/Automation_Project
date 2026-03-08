@@ -42,7 +42,6 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 │   │   ├── import.html
 │   │   ├── makeup_editor.html
 │   │   ├── payments.html
-│   │   ├── payments_tracker.html
 │   │   ├── student_profile.html
 │   │   ├── therapist_profile.html
 │   │   └── weekly_reports.html
@@ -137,10 +136,8 @@ Open: `http://127.0.0.1:5000`
 
 ## Usage Guide
 
-### Import schedules and staff info
-Go to **Import** page and choose dataset type:
-
-1) **Students + Regular Schedules**
+### Import schedules
+Go to **Import** page and upload an Excel file with columns:
 - Student Name
 - Therapist
 - Day
@@ -148,21 +145,11 @@ Go to **Import** page and choose dataset type:
 - Duration Hours
 - Contract Hours
 
-2) **Admin Staff**
-- Admin Name
-- Active (Yes/No)
-
-3) **Therapists**
-- Therapist Name
-- Active (Yes/No)
-
 ### Generate monthly attendance
 Go to **Attendance** page:
 - choose year/month
 - click **Generate Month Sessions**
-- monthly page shows rendered vs upcoming status (upcoming stays blank)
-- use **Daily Schedule** page to set status using dropdown
-- click one **Update Attendance Statuses** button at bottom of Daily Schedule page
+- edit statuses directly per session
 
 ### Add make-up session
 Go to **Make-up Editor**:
@@ -172,33 +159,20 @@ Go to **Make-up Editor**:
 
 ### Generate billing
 Go to **Billing**:
-- choose a specific student (or all students)
 - choose start/end dates
-- generate 15-day cycle advice
-- example: `Gio | 2026-03-07 to 2026-03-22` will calculate only Gio's bill for that cycle
+- generate cycles + advice
 
 ### Record payment
 Go to **Payments**:
 - select student
 - enter payment date and amount
 - system auto-allocates amount by rules
-- use **Payments Tracker** tab to validate monthly cashflow and allocations entered by admins
 
 ### Dashboard due alerts
 Dashboard shows:
 - due today
 - overdue
 - upcoming (within 3 days)
-
-### Remove / clear / edit imported records (admin maintenance)
-Go to **Import** page and use the **Clear Selected Data** form.
-- Type `CLEAR` to confirm before deletion.
-- Available cleanup targets:
-  - Students + schedules + attendance + billing advice
-  - Therapists
-  - Admin staff + admin attendance
-
-To edit imported records, re-import corrected files for new entries and use profile pages + attendance/billing/payment pages for operational edits.
 
 ### Exports
 Use **Export Reports** page to export:

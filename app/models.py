@@ -72,7 +72,7 @@ class AttendanceSession(TimestampMixin, db.Model):
     session_type = db.Column(db.String(30), default="regular", nullable=False)
     source_type = db.Column(db.String(30), default="generated", nullable=False)
     linked_regular_schedule_id = db.Column(db.Integer, db.ForeignKey("regular_schedule.id"), nullable=True)
-    status = db.Column(db.String(30), default="", nullable=False)
+    status = db.Column(db.String(30), default="Present", nullable=False)
     notes = db.Column(db.Text, default="")
     billing_included = db.Column(db.Boolean, default=False, nullable=False)
     payroll_included = db.Column(db.Boolean, default=False, nullable=False)

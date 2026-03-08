@@ -5,7 +5,7 @@ from datetime import date, time
 import pytest
 from openpyxl import Workbook
 
-from app.models import AttendanceSession, BillingAdvice, RegularSchedule, Student, Therapist, db
+from app.models import BillingAdvice, RegularSchedule, Student, Therapist, db
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, weekly_student_hours, weekly_therapist_hours
 from app.services.billing_service import WEEKDAY_RATE, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import import_students_and_schedules
@@ -23,15 +23,6 @@ def setup_basic():
     return s, t
 
 
-def mark_rendered(student_id: int | None = None):
-    q = AttendanceSession.query
-    if student_id:
-        q = q.filter_by(student_id=student_id)
-    for sess in q.all():
-        sess.status = "Present"
-    db.session.commit()
-
-
 def test_monthly_session_generation(session):
     setup_basic()
     count = generate_monthly_sessions(2026, 1)
@@ -42,13 +33,12 @@ def test_makeup_session_creation(session):
     s, t = setup_basic()
     session_obj = create_makeup_session(s.id, t.id, date(2026, 1, 2), time(10, 0), 1.0)
     assert session_obj.session_type == "makeup"
-    assert session_obj.status == ""
+    assert session_obj.status == "Make-up"
 
 
 def test_weekly_hours_calculation(session):
     s, t = setup_basic()
     generate_monthly_sessions(2026, 1)
-    mark_rendered(s.id)
     student_hours = weekly_student_hours(date(2026, 1, 1), date(2026, 1, 7))
     therapist_hours = weekly_therapist_hours(date(2026, 1, 1), date(2026, 1, 7))
     assert student_hours[s.id] == therapist_hours[t.id]
@@ -69,36 +59,34 @@ def test_weekday_weekend_rate_billing(session):
     db.session.add(RegularSchedule(student_id=s.id, therapist_id=t.id, day_of_week=5, start_time=time(9, 0), duration_hours=1))
     db.session.commit()
     generate_monthly_sessions(2026, 1)
-    mark_rendered(s.id)
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advices = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)
-    advice = advices[0]
+    advices = generate_billing_advices_for_cycle(cycle.id)
+    advice = [a for a in advices if a.student_id == s.id][0]
     assert advice.subtotal_sessions >= WEEKDAY_RATE
 
 
 def test_required_deposit_stops_after_four_cycles(session):
     s, _ = setup_basic()
     generate_monthly_sessions(2026, 1)
-    mark_rendered(s.id)
     cycles = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 3, 31))
     for c in cycles[:5]:
-        generate_billing_advices_for_cycle(c.id, student_id=s.id)
+        generate_billing_advices_for_cycle(c.id)
     advices = BillingAdvice.query.filter_by(student_id=s.id).order_by(BillingAdvice.id).all()
     non_zero = [a for a in advices if a.required_deposit_charge > 0]
     assert len(non_zero) <= 4
 
 
 def test_assessment_deposit_tracking(session):
-    s, _ = setup_basic()
+    setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice = generate_billing_advices_for_cycle(cycle.id)[0]
     assert advice.assessment_deposit_charge == 2500.0
 
 
 def test_partial_payment_allocation(session):
     s, _ = setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice = generate_billing_advices_for_cycle(cycle.id)[0]
     before = advice.total_due
     record_payment(s.id, 1000, date(2026, 1, 16))
     refreshed = BillingAdvice.query.get(advice.id)
@@ -108,7 +96,7 @@ def test_partial_payment_allocation(session):
 def test_overpayment_carry_forward(session):
     s, _ = setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice = generate_billing_advices_for_cycle(cycle.id)[0]
     record_payment(s.id, advice.total_due + 500, date(2026, 1, 16))
     db.session.refresh(s)
     assert s.overpayment_credit == 500
