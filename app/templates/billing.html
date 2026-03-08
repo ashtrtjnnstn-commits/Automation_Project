@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Billing Generator</h2>
+<form method="post" class="inline-form">
+  <label>Student
+    <select name="student_id">
+      <option value="">All active students</option>
+      {% for s in students %}
+      <option value="{{ s.id }}" {% if selected_student_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Start Date <input type="date" name="start_date" required /></label>
+  <label>End Date <input type="date" name="end_date" required /></label>
+  <button>Generate 15-day Billing</button>
+</form>
+
+{% if generated_advices %}
+<h3>Generated Advice (current run)</h3>
+<ul>
+  {% for a in generated_advices %}
+  <li>{{ a.student.name }} | {{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Total: {{ a.total_due }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if student_advices %}
+<h3>Recent Advice for Selected Student</h3>
+<ul>
+  {% for a in student_advices %}
+  <li>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Subtotal {{ a.subtotal_sessions }} | Old Bal {{ a.old_balance }} | Due {{ a.total_due }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h3>Recent Cycles</h3>
+<ul>
+{% for c in cycles %}
+<li>{{ c.start_date }} to {{ c.end_date }} (Due {{ c.due_date }}) - {{ c.billing_advices|length }} advices</li>
+{% else %}<li>No cycles yet.</li>{% endfor %}
+</ul>
+{% endblock %}
