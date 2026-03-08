@@ -1,40 +1,9 @@
 {% extends 'base.html' %}
 {% block content %}
-<h2>Import Data</h2>
-<p>Choose what to import. You can import students+schedules, admin staff, or therapists.</p>
-
-<form method="post" enctype="multipart/form-data" class="inline-form">
-  <input type="hidden" name="action" value="import" />
-  <label>Dataset
-    <select name="dataset">
-      <option value="students_schedules">Students + Regular Schedules</option>
-      <option value="admins">Admin Staff</option>
-      <option value="therapists">Therapists</option>
-    </select>
-  </label>
-  <label>Excel File <input type="file" name="file" accept=".xlsx" required /></label>
+<h2>Import Students and Schedules</h2>
+<p>Expected columns: Student Name, Therapist, Day, Start Time, Duration Hours, Contract Hours</p>
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="file" accept=".xlsx" required />
   <button>Import Excel</button>
-</form>
-
-<h3>Expected Excel Columns</h3>
-<ul>
-  <li>Students + Schedules: Student Name, Therapist, Day, Start Time, Duration Hours, Contract Hours</li>
-  <li>Admin Staff: Admin Name, Active</li>
-  <li>Therapists: Therapist Name, Active</li>
-</ul>
-
-<h3>Clear / Remove Imported Data (Admin Maintenance)</h3>
-<p>Type <strong>CLEAR</strong> to confirm cleanup.</p>
-<form method="post" class="inline-form">
-  <input type="hidden" name="action" value="clear" />
-  <label>Target
-    <select name="clear_target">
-      <option value="students">Students + schedules + attendance + billing advice</option>
-      <option value="therapists">Therapists</option>
-      <option value="admins">Admin staff + admin attendance</option>
-    </select>
-  </label>
-  <label>Confirm <input type="text" name="confirm_text" placeholder="Type CLEAR" required /></label>
-  <button>Clear Selected Data</button>
 </form>
 {% endblock %}

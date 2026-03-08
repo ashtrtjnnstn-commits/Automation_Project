@@ -1,44 +1,10 @@
 {% extends 'base.html' %}
 {% block content %}
-<h2>Payments Input</h2>
-<p><a href="{{ url_for('web.payments_tracker') }}">Open Payments Tracker tab</a> to validate monthly cashflow.</p>
-<form method="post" class="inline-form">
-  <label>Date <input type="date" name="payment_date" required /></label>
-  <label>Name of Client / Guardian <input type="text" name="client_guardian_name" required /></label>
-  <label>Name of Student
-    <select name="student_id" required>
-      {% for s in students %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}
-    </select>
-  </label>
-  <label>Purpose
-    <select name="purpose">
-      <option>Therapy</option>
-      <option>Assessment Deposit</option>
-      <option>Required Deposit</option>
-      <option>Partial Payment</option>
-    </select>
-  </label>
-  <label>Billing Period Start <input type="date" name="billing_period_start" /></label>
-  <label>Billing Period End <input type="date" name="billing_period_end" /></label>
-  <label>Total Hours Rendered <input type="number" name="total_hours_rendered" step="0.5" value="0" /></label>
-  <label>Amount Paid <input type="number" name="amount" step="0.01" required /></label>
-  <label>Received By
-    <select name="received_by_admin_id">
-      <option value="">-- Select admin --</option>
-      {% for a in admins %}<option value="{{a.id}}">{{a.name}}</option>{% endfor %}
-    </select>
-  </label>
-  <label>Mode of Transfer
-    <select name="mode_of_transfer">
-      <option>Cash</option>
-      <option>GCash</option>
-      <option>Bank Transfer</option>
-      <option>PayMaya</option>
-      <option>Check</option>
-      <option>From Required Deposit</option>
-      <option>From Overpayment</option>
-    </select>
-  </label>
+<h2>Payment Tracker</h2>
+<form method="post">
+  <label>Student <select name="student_id">{% for s in students %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}</select></label>
+  <label>Payment Date <input type="date" name="payment_date" required /></label>
+  <label>Amount <input type="number" name="amount" step="0.01" required /></label>
   <label>Notes <textarea name="notes"></textarea></label>
   <button>Record Payment</button>
 </form>

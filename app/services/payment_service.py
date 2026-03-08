@@ -14,36 +14,15 @@ from app.models import (
 )
 
 
-def record_payment(
-    student_id: int,
-    amount: float,
-    payment_date: date,
-    notes: str = "",
-    client_guardian_name: str = "",
-    purpose: str = "Therapy",
-    billing_period_start: date | None = None,
-    billing_period_end: date | None = None,
-    total_hours_rendered: float = 0.0,
-    received_by_admin_id: int | None = None,
-    mode_of_transfer: str = "Cash",
-) -> Payment:
+ALLOCATION_ORDER = ["old_balance", "current_bill", "required_deposit", "assessment_deposit"]
+
+
+def record_payment(student_id: int, amount: float, payment_date: date, notes: str = "") -> Payment:
     student = Student.query.get_or_404(student_id)
     remaining = round(amount, 2)
 
     with db.session.begin_nested():
-        payment = Payment(
-            student_id=student_id,
-            amount=amount,
-            payment_date=payment_date,
-            notes=notes,
-            client_guardian_name=client_guardian_name,
-            purpose=purpose,
-            billing_period_start=billing_period_start,
-            billing_period_end=billing_period_end,
-            total_hours_rendered=total_hours_rendered,
-            received_by_admin_id=received_by_admin_id,
-            mode_of_transfer=mode_of_transfer,
-        )
+        payment = Payment(student_id=student_id, amount=amount, payment_date=payment_date, notes=notes)
         db.session.add(payment)
         db.session.flush()
 
@@ -92,26 +71,9 @@ def record_payment(
 
         if remaining > 0:
             student.overpayment_credit = round(student.overpayment_credit + remaining, 2)
-            payment.overpayment_amount = remaining
             db.session.add(PaymentAllocation(payment_id=payment.id, allocation_type="overpayment_credit", amount=remaining))
-
-        latest_open = BillingAdvice.query.filter_by(student_id=student_id, status="Open").all()
-        payment.balance_after_payment = round(sum(a.total_due for a in latest_open), 2)
 
         db.session.add(AuditLog(action="payment_recorded", entity_type="Payment", entity_id=payment.id, details=f"amount={amount}"))
 
     db.session.commit()
     return payment
-
-
-def archive_payments(month: int, year: int) -> int:
-    payments = Payment.query.filter(
-        Payment.payment_date >= date(year, month, 1),
-        Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
-    ).all()
-    for p in payments:
-        p.is_archived = True
-        p.archive_month = month
-        p.archive_year = year
-    db.session.commit()
-    return len(payments)

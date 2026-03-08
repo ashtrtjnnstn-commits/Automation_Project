@@ -72,7 +72,7 @@ class AttendanceSession(TimestampMixin, db.Model):
     session_type = db.Column(db.String(30), default="regular", nullable=False)
     source_type = db.Column(db.String(30), default="generated", nullable=False)
     linked_regular_schedule_id = db.Column(db.Integer, db.ForeignKey("regular_schedule.id"), nullable=True)
-    status = db.Column(db.String(30), default="", nullable=False)
+    status = db.Column(db.String(30), default="Present", nullable=False)
     notes = db.Column(db.Text, default="")
     billing_included = db.Column(db.Boolean, default=False, nullable=False)
     payroll_included = db.Column(db.Boolean, default=False, nullable=False)
@@ -153,22 +153,9 @@ class Payment(TimestampMixin, db.Model):
     student_id = db.Column(db.Integer, db.ForeignKey("student.id"), nullable=False)
     payment_date = db.Column(db.Date, nullable=False)
     amount = db.Column(db.Float, nullable=False)
-    client_guardian_name = db.Column(db.String(120), default="", nullable=False)
-    purpose = db.Column(db.String(40), default="Therapy", nullable=False)
-    billing_period_start = db.Column(db.Date, nullable=True)
-    billing_period_end = db.Column(db.Date, nullable=True)
-    total_hours_rendered = db.Column(db.Float, default=0.0, nullable=False)
-    received_by_admin_id = db.Column(db.Integer, db.ForeignKey("admin_staff.id"), nullable=True)
-    overpayment_amount = db.Column(db.Float, default=0.0, nullable=False)
-    balance_after_payment = db.Column(db.Float, default=0.0, nullable=False)
-    mode_of_transfer = db.Column(db.String(40), default="Cash", nullable=False)
-    is_archived = db.Column(db.Boolean, default=False, nullable=False)
-    archive_year = db.Column(db.Integer, nullable=True)
-    archive_month = db.Column(db.Integer, nullable=True)
     notes = db.Column(db.Text, default="")
 
     student = db.relationship("Student", backref="payments")
-    received_by_admin = db.relationship("AdminStaff", backref="received_payments")
 
 
 class PaymentAllocation(TimestampMixin, db.Model):
