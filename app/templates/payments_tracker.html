@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Payments Tracker (Validation Tab)</h2>
+<p>This tab shows all payments entered in the Payments tab, including allocation breakdown.</p>
+<table>
+  <tr><th>Date</th><th>Student</th><th>Amount</th><th>Allocations</th><th>Notes</th></tr>
+  {% for p in payments %}
+  <tr>
+    <td>{{ p.payment_date }}</td>
+    <td>{{ p.student.name }}</td>
+    <td>{{ p.amount }}</td>
+    <td>
+      {% if p.allocations %}
+        <ul>
+          {% for a in p.allocations %}
+          <li>{{ a.allocation_type }}: {{ a.amount }}{% if a.billing_advice_id %} (Advice {{ a.billing_advice_id }}){% endif %}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        None
+      {% endif %}
+    </td>
+    <td>{{ p.notes }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">No payments recorded.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}
