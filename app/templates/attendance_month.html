@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Monthly Attendance</h2>
+<p>Attendance status is edited in <strong>Daily Schedule</strong>. Upcoming sessions remain blank until recorded.</p>
 <form method="get" class="inline-form">
   <label>Year <input name="year" type="number" value="{{ year }}" /></label>
   <label>Month <input name="month" type="number" value="{{ month }}" min="1" max="12" /></label>
@@ -27,15 +28,14 @@
       {% for s in rows %}
       <div class="session">
         <strong>{{ s.start_time.strftime('%H:%M') }}</strong>
-        <a href="{{ url_for('web.student_profile', student_id=s.student_id) }}">{{ s.student.name }}</a> / <a href="{{ url_for('web.therapist_profile', therapist_id=s.therapist_id) }}">{{ s.therapist.name }}</a> / {{ s.status }}
-        <form method="post" action="{{ url_for('web.session_status', session_id=s.id) }}" class="inline-form">
-          <select name="status">
-            {% for st in ['Present','Absent','Cancelled','Make-up','Rescheduled','No Show'] %}
-            <option value="{{st}}" {% if st==s.status %}selected{% endif %}>{{st}}</option>
-            {% endfor %}
-          </select>
-          <button>Update</button>
-        </form>
+        <a href="{{ url_for('web.student_profile', student_id=s.student_id) }}">{{ s.student.name }}</a> /
+        <a href="{{ url_for('web.therapist_profile', therapist_id=s.therapist_id) }}">{{ s.therapist.name }}</a> /
+        {% if s.status %}
+          {{ s.status }}
+          {% if s.status in rendered_statuses %}<span class="tag">Rendered</span>{% endif %}
+        {% else %}
+          <em>Upcoming (status blank)</em>
+        {% endif %}
       </div>
       {% endfor %}
     </td>

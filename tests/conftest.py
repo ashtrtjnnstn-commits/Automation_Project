@@ -24,3 +24,8 @@ def app():
 def session(app):
     with app.app_context():
         yield db.session
+
+
+@pytest.fixture()
+def client(app):
+    return app.test_client()

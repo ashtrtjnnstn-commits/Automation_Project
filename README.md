@@ -42,6 +42,7 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 │   │   ├── import.html
 │   │   ├── makeup_editor.html
 │   │   ├── payments.html
+│   │   ├── payments_tracker.html
 │   │   ├── student_profile.html
 │   │   ├── therapist_profile.html
 │   │   └── weekly_reports.html
@@ -80,14 +81,10 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 - Both deposits tracked in separate ledger tables for billed/paid entries.
 
 ### Payment tracker
-- Records payment + transparent allocations:
-  - old balance
-  - current bill
-  - required deposit
-  - assessment deposit
-  - leftover overpayment credit
-- Unpaid balances remain visible and carry forward.
-- Overpayments become student-level credit for next billing advice.
+- Payments Input form now stores ledger fields: Date, Client/Guardian, Student, Purpose, Billing Period, Total Hours Rendered, Amount Paid, Received By, Overpayment, Balance, and Mode of Transfer.
+- Separate Payments Dashboard/Tracker page shows the monthly operational ledger table.
+- Supports month-level archiving of payment records without deleting historical data.
+- Keeps existing allocation logic for balances/deposits and shows resulting overpayment/balance values in the ledger.
 
 ### Excel import/export
 - Import students + regular schedules from `.xlsx`.
@@ -136,8 +133,10 @@ Open: `http://127.0.0.1:5000`
 
 ## Usage Guide
 
-### Import schedules
-Go to **Import** page and upload an Excel file with columns:
+### Import schedules and staff info
+Go to **Import** page and choose dataset type:
+
+1) **Students + Regular Schedules**
 - Student Name
 - Therapist
 - Day
@@ -145,11 +144,21 @@ Go to **Import** page and upload an Excel file with columns:
 - Duration Hours
 - Contract Hours
 
+2) **Admin Staff**
+- Admin Name
+- Active (Yes/No)
+
+3) **Therapists**
+- Therapist Name
+- Active (Yes/No)
+
 ### Generate monthly attendance
 Go to **Attendance** page:
 - choose year/month
 - click **Generate Month Sessions**
-- edit statuses directly per session
+- monthly page shows rendered vs upcoming status (upcoming stays blank)
+- use **Daily Schedule** page to set status using dropdown
+- click one **Update Attendance Statuses** button at bottom of Daily Schedule page
 
 ### Add make-up session
 Go to **Make-up Editor**:
@@ -159,20 +168,33 @@ Go to **Make-up Editor**:
 
 ### Generate billing
 Go to **Billing**:
-- choose start/end dates
-- generate cycles + advice
+- select one student first (loads student-specific billing context)
+- then enter start/end dates
+- generate 15-day cycle advice for that selected student only
+- page shows student context, rendered hours, rates, deposits, previous balance/credit, and resulting total due
 
 ### Record payment
 Go to **Payments**:
-- select student
-- enter payment date and amount
-- system auto-allocates amount by rules
+- fill ledger fields (Date, Guardian/Client, Student, Purpose, Billing Period, Hours, Amount, Received By, Overpayment, Balance, Mode)
+- submit payment; system keeps allocation logic and computes/stores overpayment and balance snapshot
+- use **Payments Tracker** tab for current-month ledger filtering and archived-month retrieval
+- use archive form in tracker to archive one month (kept retrievable)
 
 ### Dashboard due alerts
 Dashboard shows:
 - due today
 - overdue
 - upcoming (within 3 days)
+
+### Remove / clear / edit imported records (admin maintenance)
+Go to **Import** page and use the **Clear Selected Data** form.
+- Type `CLEAR` to confirm before deletion.
+- Available cleanup targets:
+  - Students + schedules + attendance + billing advice
+  - Therapists
+  - Admin staff + admin attendance
+
+To edit imported records, re-import corrected files for new entries and use profile pages + attendance/billing/payment pages for operational edits.
 
 ### Exports
 Use **Export Reports** page to export:
@@ -204,3 +226,13 @@ Coverage includes:
 - Rendered sessions are statuses: Present, Make-up, Rescheduled.
 - If no regular schedule exists, required deposit fallback uses weekday rate.
 - This build is intentionally explicit and maintainable over abstract architecture.
+
+
+## Manual step after pulling schema changes
+Because new columns were added to `Payment`, reinitialize local SQLite schema if you use an existing DB file:
+
+```bash
+rm -f data/app.db
+flask --app server.py init-db
+flask --app server.py seed-data
+```

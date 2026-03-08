@@ -17,7 +17,10 @@ def _time_add(start: time, duration_hours: float) -> time:
 
 
 def generate_monthly_sessions(year: int, month: int) -> int:
-    """Generate attendance sessions for all active regular schedules for a month."""
+    """Generate attendance sessions for all active regular schedules for a month.
+
+    Status remains blank by default for upcoming schedules until staff updates attendance.
+    """
     _, days = monthrange(year, month)
     created = 0
     schedules = RegularSchedule.query.filter_by(active=True).all()
@@ -48,7 +51,7 @@ def generate_monthly_sessions(year: int, month: int) -> int:
                 session_type="regular",
                 source_type="generated",
                 linked_regular_schedule_id=schedule.id,
-                status="Present",
+                status="",
             )
             db.session.add(session)
             created += 1
@@ -77,7 +80,7 @@ def create_makeup_session(
         duration_hours=duration_hours,
         session_type="makeup",
         source_type="manual",
-        status="Make-up",
+        status="",
         notes=notes,
     )
     db.session.add(session)

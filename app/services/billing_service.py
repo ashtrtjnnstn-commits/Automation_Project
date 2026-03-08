@@ -52,11 +52,7 @@ def generate_billing_cycles_for_range(range_start: date, range_end: date) -> lis
 
 
 def _required_deposit_rate(student: Student) -> float:
-    """Fair blended rate from student's regular schedules.
-
-    Uses weekday/weekend schedule counts to produce weighted hourly rate.
-    Fallback to weekday rate when no schedules exist.
-    """
+    """Fair blended rate from student's regular schedules."""
     weekday_count = sum(1 for s in student.regular_schedules if s.day_of_week < 5)
     weekend_count = sum(1 for s in student.regular_schedules if s.day_of_week >= 5)
     total = weekday_count + weekend_count
@@ -114,9 +110,17 @@ def _assessment_deposit_charge(student: Student) -> float:
     return min(2500.0, remaining)
 
 
-def generate_billing_advices_for_cycle(cycle_id: int) -> list[BillingAdvice]:
+def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = None) -> list[BillingAdvice]:
+    """Generate billing advice for one cycle.
+
+    If student_id is provided, only that student is calculated.
+    """
     cycle = BillingCycle.query.get_or_404(cycle_id)
-    students = Student.query.filter_by(active=True).all()
+    if student_id:
+        students = Student.query.filter_by(id=student_id, active=True).all()
+    else:
+        students = Student.query.filter_by(active=True).all()
+
     created: list[BillingAdvice] = []
 
     with db.session.begin_nested():
@@ -154,7 +158,7 @@ def generate_billing_advices_for_cycle(cycle_id: int) -> list[BillingAdvice]:
             student.overpayment_credit = 0.0
             created.append(advice)
 
-        db.session.add(AuditLog(action="billing_regeneration", entity_type="BillingCycle", entity_id=cycle.id, details="Advices generated"))
+        db.session.add(AuditLog(action="billing_regeneration", entity_type="BillingCycle", entity_id=cycle.id, details=f"Advices generated for {'all students' if not student_id else f'student {student_id}'}"))
     db.session.commit()
     return created
 

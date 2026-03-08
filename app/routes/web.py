@@ -5,9 +5,25 @@ from pathlib import Path
 
 from flask import Blueprint, flash, redirect, render_template, request, send_file, url_for
 
-from app.models import AdminAttendance, AdminStaff, AttendanceSession, BillingAdvice, BillingCycle, Student, Therapist, db
+from app.models import (
+    AdminAttendance,
+    AdminStaff,
+    AssessmentDepositLedger,
+    AttendanceSession,
+    BillingAdvice,
+    BillingCycle,
+    BillingLineItem,
+    Payment,
+    PaymentAllocation,
+    RegularSchedule,
+    RequiredDepositLedger,
+    Student,
+    Therapist,
+    db,
+)
 from app.services.admin_service import admin_hours_summary
 from app.services.attendance_service import (
+    RENDERED_STATUSES,
     create_makeup_session,
     generate_monthly_sessions,
     get_month_sessions,
@@ -22,12 +38,16 @@ from app.services.import_export_service import (
     export_billing_advices,
     export_payment_ledger,
     export_therapist_weekly_hours,
+    import_admin_staff,
     import_students_and_schedules,
+    import_therapists,
 )
-from app.services.payment_service import record_payment
+from app.services.payment_service import archive_payments, record_payment
 from app.utils.date_utils import week_bounds
 
 web_bp = Blueprint("web", __name__)
+
+ATTENDANCE_STATUSES = ["Present", "Absent", "Cancelled", "Make-up", "Rescheduled", "No Show"]
 
 
 @web_bp.route("/")
@@ -59,14 +79,29 @@ def attendance_month():
         month=month,
         therapists=Therapist.query.filter_by(active=True).all(),
         students=Student.query.filter_by(active=True).all(),
+        rendered_statuses=RENDERED_STATUSES,
     )
 
 
-@web_bp.route("/attendance/daily")
+@web_bp.route("/attendance/daily", methods=["GET", "POST"])
 def daily_schedule():
+    if request.method == "POST":
+        session_ids = request.form.getlist("session_ids")
+        updated = 0
+        for raw_id in session_ids:
+            status = request.form.get(f"status_{raw_id}", "")
+            session = AttendanceSession.query.get(int(raw_id))
+            if not session:
+                continue
+            if session.status != status:
+                update_session_status(session.id, status)
+                updated += 1
+        flash(f"Updated {updated} session(s).", "success")
+        return redirect(url_for("web.daily_schedule", date=request.form["selected_date"]))
+
     selected = datetime.strptime(request.args.get("date", date.today().isoformat()), "%Y-%m-%d").date()
     sessions = AttendanceSession.query.filter_by(session_date=selected).order_by(AttendanceSession.start_time).all()
-    return render_template("daily_schedule.html", selected=selected, sessions=sessions)
+    return render_template("daily_schedule.html", selected=selected, sessions=sessions, attendance_statuses=ATTENDANCE_STATUSES)
 
 
 @web_bp.route("/students/<int:student_id>")
@@ -82,15 +117,6 @@ def therapist_profile(therapist_id: int):
     therapist = Therapist.query.get_or_404(therapist_id)
     sessions = AttendanceSession.query.filter_by(therapist_id=therapist.id).order_by(AttendanceSession.session_date.desc()).limit(20).all()
     return render_template("therapist_profile.html", therapist=therapist, sessions=sessions)
-
-
-@web_bp.route("/session/<int:session_id>/status", methods=["POST"])
-def session_status(session_id: int):
-    status = request.form["status"]
-    notes = request.form.get("notes", "")
-    update_session_status(session_id, status, notes)
-    flash("Session updated.", "success")
-    return redirect(request.referrer or url_for("web.attendance_month"))
 
 
 @web_bp.route("/makeup", methods=["GET", "POST"])
@@ -155,42 +181,155 @@ def admin_attendance_page():
 
 @web_bp.route("/billing", methods=["GET", "POST"])
 def billing_page():
+    generated_advices: list[BillingAdvice] = []
+    selected_student_id = request.values.get("student_id", type=int)
+
     if request.method == "POST":
+        selected_student_id = request.form.get("student_id", type=int)
+        if not selected_student_id:
+            flash("Please select a student first.", "error")
+            return redirect(url_for("web.billing_page"))
+
         start = datetime.strptime(request.form["start_date"], "%Y-%m-%d").date()
         end = datetime.strptime(request.form["end_date"], "%Y-%m-%d").date()
         cycles = generate_billing_cycles_for_range(start, end)
         for c in cycles:
-            generate_billing_advices_for_cycle(c.id)
-        flash(f"Generated {len(cycles)} cycle(s) and billing advice.", "success")
-        return redirect(url_for("web.billing_page"))
+            generated_advices.extend(generate_billing_advices_for_cycle(c.id, student_id=selected_student_id))
+        flash(f"Generated billing for {len(generated_advices)} advice record(s).", "success")
+
     cycles = BillingCycle.query.order_by(BillingCycle.start_date.desc()).limit(10).all()
-    return render_template("billing.html", cycles=cycles)
+    selected_student = Student.query.get(selected_student_id) if selected_student_id else None
+    student_advices = []
+    if selected_student_id:
+        student_advices = BillingAdvice.query.filter_by(student_id=selected_student_id).order_by(BillingAdvice.id.desc()).limit(20).all()
+
+    return render_template(
+        "billing.html",
+        cycles=cycles,
+        students=Student.query.filter_by(active=True).all(),
+        selected_student_id=selected_student_id,
+        selected_student=selected_student,
+        generated_advices=generated_advices,
+        student_advices=student_advices,
+    )
 
 
 @web_bp.route("/payments", methods=["GET", "POST"])
 def payments_page():
     if request.method == "POST":
-        record_payment(
+        billing_period_start = request.form.get("billing_period_start")
+        billing_period_end = request.form.get("billing_period_end")
+        payment = record_payment(
             student_id=int(request.form["student_id"]),
             amount=float(request.form["amount"]),
             payment_date=datetime.strptime(request.form["payment_date"], "%Y-%m-%d").date(),
             notes=request.form.get("notes", ""),
+            client_guardian_name=request.form.get("client_guardian_name", ""),
+            purpose=request.form.get("purpose", "Therapy"),
+            billing_period_start=datetime.strptime(billing_period_start, "%Y-%m-%d").date() if billing_period_start else None,
+            billing_period_end=datetime.strptime(billing_period_end, "%Y-%m-%d").date() if billing_period_end else None,
+            total_hours_rendered=float(request.form.get("total_hours_rendered", 0) or 0),
+            received_by_admin_id=request.form.get("received_by_admin_id", type=int),
+            mode_of_transfer=request.form.get("mode_of_transfer", "Cash"),
+            manual_overpayment=request.form.get("overpayment_amount", type=float),
+            manual_balance=request.form.get("balance_after_payment", type=float),
         )
-        flash("Payment recorded.", "success")
-        return redirect(url_for("web.payments_page"))
-    return render_template("payments.html", students=Student.query.all())
+        flash(f"Payment recorded (ID {payment.id}).", "success")
+        return redirect(url_for("web.payments_tracker"))
+    return render_template("payments.html", students=Student.query.all(), admins=AdminStaff.query.filter_by(active=True).all())
+
+
+@web_bp.route("/payments/tracker", methods=["GET", "POST"])
+def payments_tracker():
+    if request.method == "POST" and request.form.get("action") == "archive":
+        month = int(request.form["archive_month"])
+        year = int(request.form["archive_year"])
+        count = archive_payments(month=month, year=year)
+        flash(f"Archived {count} payment record(s) for {year}-{month:02d}.", "success")
+        return redirect(url_for("web.payments_tracker", view="active"))
+
+    today = date.today()
+    view = request.args.get("view", "active")
+    month = request.args.get("month", type=int) or today.month
+    year = request.args.get("year", type=int) or today.year
+
+    query = Payment.query
+    if view == "archived":
+        query = query.filter(Payment.is_archived.is_(True))
+        query = query.filter(Payment.archive_month == month, Payment.archive_year == year)
+    else:
+        query = query.filter(Payment.is_archived.is_(False))
+        query = query.filter(
+            Payment.payment_date >= date(year, month, 1),
+            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
+        )
+
+    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
+    archived_groups = (
+        db.session.query(Payment.archive_year, Payment.archive_month)
+        .filter(Payment.is_archived.is_(True))
+        .distinct()
+        .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
+        .all()
+    )
+    return render_template(
+        "payments_tracker.html",
+        payments=payments,
+        view=view,
+        month=month,
+        year=year,
+        archived_groups=archived_groups,
+    )
 
 
 @web_bp.route("/import", methods=["GET", "POST"])
 def import_page():
     if request.method == "POST":
+        action = request.form.get("action", "import")
+
+        if action == "clear":
+            target = request.form["clear_target"]
+            confirmation = request.form.get("confirm_text", "")
+            if confirmation != "CLEAR":
+                flash("Type CLEAR to confirm data cleanup.", "error")
+                return redirect(url_for("web.import_page"))
+
+            if target == "students":
+                BillingLineItem.query.delete()
+                PaymentAllocation.query.delete()
+                Payment.query.delete()
+                RequiredDepositLedger.query.delete()
+                AssessmentDepositLedger.query.delete()
+                BillingAdvice.query.delete()
+                AttendanceSession.query.delete()
+                RegularSchedule.query.delete()
+                Student.query.delete()
+            elif target == "therapists":
+                AttendanceSession.query.delete()
+                RegularSchedule.query.delete()
+                for student in Student.query.all():
+                    student.assigned_therapist_id = None
+                Therapist.query.delete()
+            elif target == "admins":
+                AdminAttendance.query.delete()
+                AdminStaff.query.delete()
+            db.session.commit()
+            flash(f"Cleared imported {target} data.", "success")
+            return redirect(url_for("web.import_page"))
+
         file = request.files["file"]
         save_path = Path("data") / file.filename
         save_path.parent.mkdir(exist_ok=True)
         file.save(save_path)
+        dataset = request.form.get("dataset", "students_schedules")
         try:
-            inserted = import_students_and_schedules(str(save_path))
-            flash(f"Imported {inserted} schedule rows.", "success")
+            if dataset == "students_schedules":
+                inserted = import_students_and_schedules(str(save_path))
+            elif dataset == "admins":
+                inserted = import_admin_staff(str(save_path))
+            else:
+                inserted = import_therapists(str(save_path))
+            flash(f"Imported {inserted} row(s) for {dataset}.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
         return redirect(url_for("web.import_page"))
@@ -200,19 +339,23 @@ def import_page():
 @web_bp.route("/export/<string:kind>")
 def export_page(kind: str):
     Path("exports").mkdir(exist_ok=True)
-    if kind == "attendance":
-        path = export_attendance_summary("exports/attendance.xlsx")
-    elif kind == "admin":
-        path = export_admin_attendance("exports/admin_attendance.xlsx")
-    elif kind == "billing":
-        path = export_billing_advices("exports/billing_advices.xlsx")
-    elif kind == "payments":
-        path = export_payment_ledger("exports/payment_ledger.xlsx")
-    elif kind == "therapist-weekly":
-        today = date.today()
-        start, end = week_bounds(today)
-        path = export_therapist_weekly_hours("exports/therapist_weekly_hours.xlsx", start, end)
-    else:
-        flash("Unknown export type", "error")
-        return redirect(url_for("web.dashboard"))
-    return send_file(path, as_attachment=True)
+    try:
+        if kind == "attendance":
+            path = export_attendance_summary("exports/attendance.xlsx")
+        elif kind == "admin":
+            path = export_admin_attendance("exports/admin_attendance.xlsx")
+        elif kind == "billing":
+            path = export_billing_advices("exports/billing_advices.xlsx")
+        elif kind == "payments":
+            path = export_payment_ledger("exports/payment_ledger.xlsx")
+        elif kind == "therapist-weekly":
+            today = date.today()
+            start, end = week_bounds(today)
+            path = export_therapist_weekly_hours("exports/therapist_weekly_hours.xlsx", start, end)
+        else:
+            flash("Unknown export type", "error")
+            return redirect(url_for("web.dashboard"))
+        return send_file(path, as_attachment=True)
+    except FileNotFoundError:
+        flash("Export file could not be created. Please try again.", "error")
+        return redirect(url_for("web.export_reports_page"))

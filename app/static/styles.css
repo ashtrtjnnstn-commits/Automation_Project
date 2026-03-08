@@ -13,3 +13,5 @@ th, td { border: 1px solid #e5e7eb; padding: 0.5rem; vertical-align: top; }
 .flash { padding: 0.5rem; border-radius: 6px; }
 .flash.success { background: #dcfce7; }
 .flash.error { background: #fee2e2; }
+
+.tag { background: #dbeafe; color: #1d4ed8; padding: 0.1rem 0.4rem; border-radius: 9999px; font-size: 0.75rem; margin-left: 0.25rem; }

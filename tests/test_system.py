@@ -5,7 +5,7 @@ from datetime import date, time
 import pytest
 from openpyxl import Workbook
 
-from app.models import BillingAdvice, RegularSchedule, Student, Therapist, db
+from app.models import AdminStaff, AttendanceSession, BillingAdvice, Payment, RegularSchedule, Student, Therapist, db
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, weekly_student_hours, weekly_therapist_hours
 from app.services.billing_service import WEEKDAY_RATE, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import import_students_and_schedules
@@ -23,6 +23,15 @@ def setup_basic():
     return s, t
 
 
+def mark_rendered(student_id: int | None = None):
+    q = AttendanceSession.query
+    if student_id:
+        q = q.filter_by(student_id=student_id)
+    for sess in q.all():
+        sess.status = "Present"
+    db.session.commit()
+
+
 def test_monthly_session_generation(session):
     setup_basic()
     count = generate_monthly_sessions(2026, 1)
@@ -33,12 +42,13 @@ def test_makeup_session_creation(session):
     s, t = setup_basic()
     session_obj = create_makeup_session(s.id, t.id, date(2026, 1, 2), time(10, 0), 1.0)
     assert session_obj.session_type == "makeup"
-    assert session_obj.status == "Make-up"
+    assert session_obj.status == ""
 
 
 def test_weekly_hours_calculation(session):
     s, t = setup_basic()
     generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
     student_hours = weekly_student_hours(date(2026, 1, 1), date(2026, 1, 7))
     therapist_hours = weekly_therapist_hours(date(2026, 1, 1), date(2026, 1, 7))
     assert student_hours[s.id] == therapist_hours[t.id]
@@ -59,34 +69,36 @@ def test_weekday_weekend_rate_billing(session):
     db.session.add(RegularSchedule(student_id=s.id, therapist_id=t.id, day_of_week=5, start_time=time(9, 0), duration_hours=1))
     db.session.commit()
     generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advices = generate_billing_advices_for_cycle(cycle.id)
-    advice = [a for a in advices if a.student_id == s.id][0]
+    advices = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)
+    advice = advices[0]
     assert advice.subtotal_sessions >= WEEKDAY_RATE
 
 
 def test_required_deposit_stops_after_four_cycles(session):
     s, _ = setup_basic()
     generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
     cycles = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 3, 31))
     for c in cycles[:5]:
-        generate_billing_advices_for_cycle(c.id)
+        generate_billing_advices_for_cycle(c.id, student_id=s.id)
     advices = BillingAdvice.query.filter_by(student_id=s.id).order_by(BillingAdvice.id).all()
     non_zero = [a for a in advices if a.required_deposit_charge > 0]
     assert len(non_zero) <= 4
 
 
 def test_assessment_deposit_tracking(session):
-    setup_basic()
+    s, _ = setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advice = generate_billing_advices_for_cycle(cycle.id)[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
     assert advice.assessment_deposit_charge == 2500.0
 
 
 def test_partial_payment_allocation(session):
     s, _ = setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advice = generate_billing_advices_for_cycle(cycle.id)[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
     before = advice.total_due
     record_payment(s.id, 1000, date(2026, 1, 16))
     refreshed = BillingAdvice.query.get(advice.id)
@@ -96,7 +108,7 @@ def test_partial_payment_allocation(session):
 def test_overpayment_carry_forward(session):
     s, _ = setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
-    advice = generate_billing_advices_for_cycle(cycle.id)[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
     record_payment(s.id, advice.total_due + 500, date(2026, 1, 16))
     db.session.refresh(s)
     assert s.overpayment_credit == 500
@@ -112,3 +124,102 @@ def test_import_validates_required_columns(session, tmp_path):
 
     with pytest.raises(ValueError):
         import_students_and_schedules(str(path))
+
+
+def test_daily_schedule_updates_attendance_record(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    target = AttendanceSession.query.filter_by(student_id=s.id).first()
+
+    response = client.post(
+        "/attendance/daily",
+        data={
+            "selected_date": target.session_date.isoformat(),
+            "session_ids": [str(target.id)],
+            f"status_{target.id}": "Present",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    db.session.refresh(target)
+    assert target.status == "Present"
+
+
+def test_monthly_attendance_reflects_daily_status(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    target = AttendanceSession.query.filter_by(student_id=s.id).first()
+    target.status = "Absent"
+    db.session.commit()
+
+    response = client.get(f"/attendance?year=2026&month=1&student_id={s.id}")
+    assert response.status_code == 200
+    assert b"Absent" in response.data
+
+
+def test_payment_dashboard_record_creation(session, client):
+    s, _ = setup_basic()
+    admin = AdminStaff(name="Receiver A")
+    db.session.add(admin)
+    db.session.commit()
+
+    response = client.post(
+        "/payments",
+        data={
+            "payment_date": "2026-01-10",
+            "client_guardian_name": "Juan Dela Cruz",
+            "student_id": str(s.id),
+            "purpose": "Therapy",
+            "billing_period_start": "2026-01-01",
+            "billing_period_end": "2026-01-15",
+            "total_hours_rendered": "2",
+            "amount": "1000",
+            "received_by_admin_id": str(admin.id),
+            "overpayment_amount": "12.5",
+            "balance_after_payment": "88.0",
+            "mode_of_transfer": "GCash",
+            "notes": "test",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    payment = Payment.query.order_by(Payment.id.desc()).first()
+    assert payment.client_guardian_name == "Juan Dela Cruz"
+    assert payment.mode_of_transfer == "GCash"
+    assert payment.overpayment_amount == 12.5
+    assert payment.balance_after_payment == 88.0
+
+
+def test_monthly_payment_archive_retrieval(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name="A"))
+    db.session.commit()
+
+    res_archive = client.post("/payments/tracker", data={"action": "archive", "archive_month": "1", "archive_year": "2026"}, follow_redirects=True)
+    assert res_archive.status_code == 200
+
+    res_view = client.get("/payments/tracker?view=archived&month=1&year=2026")
+    assert res_view.status_code == 200
+    assert b"2026-01-10" in res_view.data
+
+
+def test_billing_page_requires_student_selection(session, client):
+    response = client.post(
+        "/billing",
+        data={"start_date": "2026-01-01", "end_date": "2026-01-15", "student_id": ""},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"Please select a student first." in response.data
+
+
+def test_payments_tracker_filters_current_month(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name="A", is_archived=False))
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 2, 10), amount=700, client_guardian_name="B", is_archived=False))
+    db.session.commit()
+
+    res = client.get("/payments/tracker?view=active&month=1&year=2026")
+    assert res.status_code == 200
+    assert b"2026-01-10" in res.data
+    assert b"2026-02-10" not in res.data
