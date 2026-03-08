@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Payments Dashboard / Ledger</h2>
+
+<div class="inline-form">
+  <a href="{{ url_for('web.payments_tracker', view='active') }}">Active Month Records</a>
+  <a href="{{ url_for('web.payments_tracker', view='archived') }}">Archived Records</a>
+</div>
+
+{% if view == 'archived' %}
+<form method="get" class="inline-form">
+  <input type="hidden" name="view" value="archived" />
+  <label>Month <input type="number" min="1" max="12" name="month" value="{{ month or '' }}" /></label>
+  <label>Year <input type="number" name="year" value="{{ year or '' }}" /></label>
+  <button>Filter Archives</button>
+</form>
+{% endif %}
+
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="archive" />
+  <label>Archive Month <input type="number" name="archive_month" min="1" max="12" required /></label>
+  <label>Archive Year <input type="number" name="archive_year" required /></label>
+  <button>Archive Records for Month</button>
+</form>
+
+{% if archived_groups %}
+<p>Archived groups:
+  {% for y, m in archived_groups %}
+    <a href="{{ url_for('web.payments_tracker', view='archived', month=m, year=y) }}">{{ y }}-{{ '%02d'|format(m) }}</a>
+  {% endfor %}
+</p>
+{% endif %}
+
+<table>
+  <tr>
+    <th>Date</th>
+    <th>Name of Client / Guardian</th>
+    <th>Name of Student</th>
+    <th>Purpose</th>
+    <th>Billing Period</th>
+    <th>Total Hours Rendered</th>
+    <th>Amount Paid</th>
+    <th>Received By</th>
+    <th>Overpayment</th>
+    <th>Balance</th>
+    <th>Mode of Transfer</th>
+  </tr>
+  {% for p in payments %}
+  <tr>
+    <td>{{ p.payment_date }}</td>
+    <td>{{ p.client_guardian_name }}</td>
+    <td>{{ p.student.name }}</td>
+    <td>{{ p.purpose }}</td>
+    <td>
+      {% if p.billing_period_start and p.billing_period_end %}
+        {{ p.billing_period_start }} to {{ p.billing_period_end }}
+      {% else %}
+        -
+      {% endif %}
+    </td>
+    <td>{{ p.total_hours_rendered }}</td>
+    <td>{{ p.amount }}</td>
+    <td>{{ p.received_by_admin.name if p.received_by_admin else '-' }}</td>
+    <td>{{ p.overpayment_amount }}</td>
+    <td>{{ p.balance_after_payment }}</td>
+    <td>{{ p.mode_of_transfer }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="11">No payment records.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}
