@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Therapist Profile: {{ therapist.name }}</h2>
+<p>Active: {{ 'Yes' if therapist.active else 'No' }}</p>
+<h3>Students</h3>
+<ul>
+{% for s in therapist.students %}
+<li><a href="{{ url_for('web.student_profile', student_id=s.id) }}">{{ s.name }}</a></li>
+{% else %}<li>No students assigned.</li>{% endfor %}
+</ul>
+<h3>Recent Sessions</h3>
+<ul>
+{% for s in sessions %}
+<li>{{ s.session_date }} {{ s.start_time.strftime('%H:%M') }} - {{ s.student.name }} ({{ s.status }})</li>
+{% else %}<li>No sessions yet.</li>{% endfor %}
+</ul>
+{% endblock %}
