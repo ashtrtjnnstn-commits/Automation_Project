@@ -46,7 +46,7 @@ def generate_monthly_sessions(year: int, month: int) -> int:
                 therapist_id=schedule.therapist_id,
                 session_date=session_date,
                 start_time=schedule.start_time,
-                end_time=_time_add(schedule.start_time, schedule.duration_hours),
+                end_time=schedule.end_time or _time_add(schedule.start_time, schedule.duration_hours),
                 duration_hours=schedule.duration_hours,
                 session_type="regular",
                 source_type="generated",

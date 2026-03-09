@@ -52,6 +52,7 @@ class RegularSchedule(TimestampMixin, db.Model):
     therapist_id = db.Column(db.Integer, db.ForeignKey("therapist.id"), nullable=False)
     day_of_week = db.Column(db.Integer, nullable=False)  # 0=Mon
     start_time = db.Column(db.Time, nullable=False)
+    end_time = db.Column(db.Time, nullable=True)
     duration_hours = db.Column(db.Float, nullable=False)
     effective_from = db.Column(db.Date, nullable=True)
     effective_to = db.Column(db.Date, nullable=True)
@@ -217,3 +218,23 @@ class AuditLog(TimestampMixin, db.Model):
     entity_type = db.Column(db.String(80), nullable=False)
     entity_id = db.Column(db.Integer, nullable=True)
     details = db.Column(db.Text, default="")
+
+
+class WeeklyReportArchive(TimestampMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    week_start = db.Column(db.Date, nullable=False)
+    week_end = db.Column(db.Date, nullable=False)
+    note = db.Column(db.String(200), default="")
+
+    __table_args__ = (UniqueConstraint("week_start", "week_end", name="uniq_week_archive"),)
+
+
+class WeeklyReportArchiveItem(TimestampMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    archive_id = db.Column(db.Integer, db.ForeignKey("weekly_report_archive.id"), nullable=False)
+    section = db.Column(db.String(20), nullable=False)  # student/therapist/admin
+    reference_id = db.Column(db.Integer, nullable=True)
+    reference_name = db.Column(db.String(120), nullable=False)
+    hours = db.Column(db.Float, default=0.0, nullable=False)
+
+    archive = db.relationship("WeeklyReportArchive", backref="items")

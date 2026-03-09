@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -19,6 +19,11 @@ from app.models import (
 from app.services.attendance_service import weekly_therapist_hours
 
 DAY_MAP = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
+
+
+def _end_time_from_duration(start_time, duration_hours: float):
+    dt = datetime.combine(date.today(), start_time) + timedelta(hours=duration_hours)
+    return dt.time().replace(second=0, microsecond=0)
 
 
 def _sheet_header(ws) -> list[str]:
@@ -77,6 +82,7 @@ def import_students_and_schedules(path: str, column_map: dict[str, str] | None =
             therapist_id=therapist.id,
             day_of_week=day,
             start_time=start_time,
+            end_time=_end_time_from_duration(start_time, duration),
             duration_hours=duration,
         )
         db.session.add(schedule)

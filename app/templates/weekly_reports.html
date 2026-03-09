@@ -1,10 +1,31 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Weekly Reports ({{ start }} to {{ end }})</h2>
+<form method="get" class="inline-form">
+  <label>Week Date <input type="date" name="date" value="{{ selected_date }}" /></label>
+  <button>Load Week</button>
+</form>
+
+<form method="post" class="inline-form">
+  <input type="hidden" name="date" value="{{ selected_date }}" />
+  <input type="hidden" name="action" value="archive_week" />
+  <label>Archive Note <input type="text" name="note" /></label>
+  <button>Archive This Week</button>
+</form>
+
 <h3>Student Rendered Hours</h3>
 <ul>{% for sid, hrs in student_hours.items() %}<li>{{ students[sid].name }}: {{ hrs }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
 <h3>Therapist Rendered Hours</h3>
 <ul>{% for tid, hrs in therapist_hours.items() %}<li>{{ therapists[tid].name }}: {{ hrs }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
 <h3>Admin Hours</h3>
 <ul>{% for aid, hrs in admin_hours.items() %}<li>{{ admins[aid].name }}: {{ hrs }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
+
+<h3>Archived Weekly Reports</h3>
+<ul>
+  {% for arc in archives %}
+  <li><a href="{{ url_for('web.weekly_archive_view', archive_id=arc.id) }}">{{ arc.week_start }} to {{ arc.week_end }}</a></li>
+  {% else %}
+  <li>No archived weekly snapshots yet.</li>
+  {% endfor %}
+</ul>
 {% endblock %}

@@ -40,11 +40,17 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 │   │   ├── dashboard.html
 │   │   ├── export_reports.html
 │   │   ├── import.html
+│   │   ├── master_admins.html
+│   │   ├── master_data_index.html
+│   │   ├── master_schedules.html
+│   │   ├── master_students.html
+│   │   ├── master_therapists.html
 │   │   ├── makeup_editor.html
 │   │   ├── payments.html
 │   │   ├── payments_tracker.html
 │   │   ├── student_profile.html
 │   │   ├── therapist_profile.html
+│   │   ├── weekly_archive_view.html
 │   │   └── weekly_reports.html
 │   └── utils
 │       └── date_utils.py
@@ -204,6 +210,20 @@ Use **Export Reports** page to export:
 - payment ledger
 - admin attendance
 
+### Master data management
+Use **Master Data** tab to manage core records in-app (no Excel required):
+- Students (add/edit/active)
+- Therapists (add/edit/active)
+- Admin Staff (add/edit/active)
+- Regular Schedules (add/edit/active with validation)
+
+### Weekly report archiving
+From **Weekly Reports**:
+- load a week
+- click **Archive This Week** to freeze a snapshot
+- open archived entries from the archive list
+- archived view uses stored snapshot rows (not live recomputation)
+
 ## Tests
 Run:
 ```bash
@@ -229,7 +249,7 @@ Coverage includes:
 
 
 ## Manual step after pulling schema changes
-Because new columns were added to `Payment`, reinitialize local SQLite schema if you use an existing DB file:
+New tables/columns were added (`RegularSchedule.end_time`, `WeeklyReportArchive`, `WeeklyReportArchiveItem`). Reinitialize local DB if needed:
 
 ```bash
 rm -f data/app.db

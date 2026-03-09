@@ -223,3 +223,69 @@ def test_payments_tracker_filters_current_month(session, client):
     assert res.status_code == 200
     assert b"2026-01-10" in res.data
     assert b"2026-02-10" not in res.data
+
+
+def test_master_data_student_crud_page(session, client):
+    res_create = client.post(
+        "/master-data/students",
+        data={"action": "create", "name": "New Student", "contract_hours_per_week": "4", "overpayment_credit": "0", "active": "1"},
+        follow_redirects=True,
+    )
+    assert res_create.status_code == 200
+    student = Student.query.filter_by(name="New Student").first()
+    assert student is not None
+
+    res_edit = client.post(
+        "/master-data/students",
+        data={"action": "edit", "student_id": str(student.id), "name": "Updated Student", "contract_hours_per_week": "5", "overpayment_credit": "1.5", "active": "0"},
+        follow_redirects=True,
+    )
+    assert res_edit.status_code == 200
+    db.session.refresh(student)
+    assert student.name == "Updated Student"
+    assert student.active is False
+
+
+def test_master_data_schedule_validation_end_time(session, client):
+    s, t = setup_basic()
+    response = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "create",
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "09:00",
+            "active": "1",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"End time must be after start time." in response.data
+
+
+def test_weekly_report_archive_creation_and_view(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+
+    res = client.post("/reports/weekly", data={"date": "2026-01-05", "action": "archive_week", "note": "snapshot"}, follow_redirects=True)
+    assert res.status_code == 200
+    assert b"Weekly report archived." in res.data
+
+    # locate archive link and open list page
+    list_res = client.get("/reports/weekly?date=2026-01-05")
+    assert list_res.status_code == 200
+    assert b"Archived Weekly Reports" in list_res.data
+
+
+def test_weekly_report_archive_prevents_duplicate(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+
+    client.post("/reports/weekly", data={"date": "2026-01-05", "action": "archive_week", "note": "a"}, follow_redirects=True)
+    res2 = client.post("/reports/weekly", data={"date": "2026-01-05", "action": "archive_week", "note": "b"}, follow_redirects=True)
+    assert res2.status_code == 200
+    assert b"already archived" in res2.data

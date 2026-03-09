@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from flask import Blueprint, flash, redirect, render_template, request, send_file, url_for
@@ -19,6 +19,7 @@ from app.models import (
     RequiredDepositLedger,
     Student,
     Therapist,
+    WeeklyReportArchive,
     db,
 )
 from app.services.admin_service import admin_hours_summary
@@ -43,6 +44,7 @@ from app.services.import_export_service import (
     import_therapists,
 )
 from app.services.payment_service import archive_payments, record_payment
+from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.date_utils import week_bounds
 
 web_bp = Blueprint("web", __name__)
@@ -138,21 +140,41 @@ def makeup_editor():
     return render_template("makeup_editor.html", students=Student.query.all(), therapists=Therapist.query.all())
 
 
-@web_bp.route("/reports/weekly")
+@web_bp.route("/reports/weekly", methods=["GET", "POST"])
 def weekly_reports():
-    base = datetime.strptime(request.args.get("date", date.today().isoformat()), "%Y-%m-%d").date()
+    base = datetime.strptime(request.values.get("date", date.today().isoformat()), "%Y-%m-%d").date()
     start, end = week_bounds(base)
+
+    if request.method == "POST" and request.form.get("action") == "archive_week":
+        note = request.form.get("note", "")
+        try:
+            archive_weekly_report(start, end, note=note)
+            flash("Weekly report archived.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("web.weekly_reports", date=base.isoformat()))
+
+    archives = WeeklyReportArchive.query.order_by(WeeklyReportArchive.week_start.desc()).limit(20).all()
     return render_template(
         "weekly_reports.html",
         start=start,
         end=end,
+        selected_date=base,
         student_hours=weekly_student_hours(start, end),
         therapist_hours=weekly_therapist_hours(start, end),
         admin_hours=admin_hours_summary(start, end),
         students={s.id: s for s in Student.query.all()},
         therapists={t.id: t for t in Therapist.query.all()},
         admins={a.id: a for a in AdminStaff.query.all()},
+        archives=archives,
     )
+
+
+@web_bp.route("/reports/weekly/archive/<int:archive_id>")
+def weekly_archive_view(archive_id: int):
+    archive = WeeklyReportArchive.query.get_or_404(archive_id)
+    sections = get_archive_sections(archive)
+    return render_template("weekly_archive_view.html", archive=archive, sections=sections)
 
 
 @web_bp.route("/reports/export")
@@ -279,6 +301,152 @@ def payments_tracker():
         month=month,
         year=year,
         archived_groups=archived_groups,
+    )
+
+
+
+
+@web_bp.route("/master-data")
+def master_data_index():
+    return render_template("master_data_index.html")
+
+
+@web_bp.route("/master-data/students", methods=["GET", "POST"])
+def master_students():
+    if request.method == "POST":
+        action = request.form.get("action", "create")
+        name = request.form.get("name", "").strip()
+        if not name:
+            flash("Student name is required.", "error")
+            return redirect(url_for("web.master_students"))
+
+        if action == "create":
+            student = Student(name=name)
+            db.session.add(student)
+        else:
+            student = Student.query.get_or_404(int(request.form["student_id"]))
+            student.name = name
+
+        student.contract_hours_per_week = float(request.form.get("contract_hours_per_week", 0) or 0)
+        student.overpayment_credit = float(request.form.get("overpayment_credit", 0) or 0)
+        student.active = request.form.get("active", "1") == "1"
+        db.session.commit()
+        flash("Student saved.", "success")
+        return redirect(url_for("web.master_students"))
+
+    return render_template("master_students.html", students=Student.query.order_by(Student.name).all())
+
+
+@web_bp.route("/master-data/therapists", methods=["GET", "POST"])
+def master_therapists():
+    if request.method == "POST":
+        action = request.form.get("action", "create")
+        name = request.form.get("name", "").strip()
+        if not name:
+            flash("Therapist name is required.", "error")
+            return redirect(url_for("web.master_therapists"))
+        if action == "create":
+            therapist = Therapist(name=name)
+            db.session.add(therapist)
+        else:
+            therapist = Therapist.query.get_or_404(int(request.form["therapist_id"]))
+            therapist.name = name
+        therapist.active = request.form.get("active", "1") == "1"
+        db.session.commit()
+        flash("Therapist saved.", "success")
+        return redirect(url_for("web.master_therapists"))
+
+    return render_template("master_therapists.html", therapists=Therapist.query.order_by(Therapist.name).all())
+
+
+@web_bp.route("/master-data/admins", methods=["GET", "POST"])
+def master_admins():
+    if request.method == "POST":
+        action = request.form.get("action", "create")
+        name = request.form.get("name", "").strip()
+        if not name:
+            flash("Admin name is required.", "error")
+            return redirect(url_for("web.master_admins"))
+        if action == "create":
+            admin = AdminStaff(name=name)
+            db.session.add(admin)
+        else:
+            admin = AdminStaff.query.get_or_404(int(request.form["admin_id"]))
+            admin.name = name
+        admin.active = request.form.get("active", "1") == "1"
+        db.session.commit()
+        flash("Admin staff saved.", "success")
+        return redirect(url_for("web.master_admins"))
+
+    return render_template("master_admins.html", admins=AdminStaff.query.order_by(AdminStaff.name).all())
+
+
+@web_bp.route("/master-data/schedules", methods=["GET", "POST"])
+def master_schedules():
+    if request.method == "POST":
+        action = request.form.get("action", "create")
+        student_id = request.form.get("student_id", type=int)
+        therapist_id = request.form.get("therapist_id", type=int)
+        day_of_week = request.form.get("day_of_week", type=int)
+        start_raw = request.form.get("start_time", "")
+        end_raw = request.form.get("end_time", "")
+        if not all([student_id, therapist_id]) or day_of_week is None or not start_raw or not end_raw:
+            flash("All schedule fields are required.", "error")
+            return redirect(url_for("web.master_schedules"))
+
+        if not Student.query.get(student_id) or not Therapist.query.get(therapist_id):
+            flash("Invalid student or therapist reference.", "error")
+            return redirect(url_for("web.master_schedules"))
+
+        start_time_obj = datetime.strptime(start_raw, "%H:%M").time()
+        end_time_obj = datetime.strptime(end_raw, "%H:%M").time()
+        if end_time_obj <= start_time_obj:
+            flash("End time must be after start time.", "error")
+            return redirect(url_for("web.master_schedules"))
+
+        duration_hours = (datetime.combine(date.today(), end_time_obj) - datetime.combine(date.today(), start_time_obj)).seconds / 3600
+
+        conflict_query = RegularSchedule.query.filter_by(
+            student_id=student_id,
+            therapist_id=therapist_id,
+            day_of_week=day_of_week,
+            start_time=start_time_obj,
+            end_time=end_time_obj,
+        )
+
+        if action == "create":
+            if conflict_query.first():
+                flash("Duplicate schedule row exists.", "error")
+                return redirect(url_for("web.master_schedules"))
+            sched = RegularSchedule(
+                student_id=student_id,
+                therapist_id=therapist_id,
+                day_of_week=day_of_week,
+                start_time=start_time_obj,
+                end_time=end_time_obj,
+                duration_hours=duration_hours,
+                active=request.form.get("active", "1") == "1",
+            )
+            db.session.add(sched)
+        else:
+            sched = RegularSchedule.query.get_or_404(int(request.form["schedule_id"]))
+            sched.student_id = student_id
+            sched.therapist_id = therapist_id
+            sched.day_of_week = day_of_week
+            sched.start_time = start_time_obj
+            sched.end_time = end_time_obj
+            sched.duration_hours = duration_hours
+            sched.active = request.form.get("active", "1") == "1"
+
+        db.session.commit()
+        flash("Regular schedule saved.", "success")
+        return redirect(url_for("web.master_schedules"))
+
+    return render_template(
+        "master_schedules.html",
+        schedules=RegularSchedule.query.order_by(RegularSchedule.day_of_week, RegularSchedule.start_time).all(),
+        students=Student.query.order_by(Student.name).all(),
+        therapists=Therapist.query.order_by(Therapist.name).all(),
     )
 
 

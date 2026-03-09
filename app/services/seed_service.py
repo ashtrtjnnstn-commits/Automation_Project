@@ -21,10 +21,10 @@ def seed_sample_data() -> None:
     db.session.flush()
 
     db.session.add_all([
-        RegularSchedule(student_id=s1.id, therapist_id=t1.id, day_of_week=0, start_time=time(9, 0), duration_hours=2),
-        RegularSchedule(student_id=s1.id, therapist_id=t1.id, day_of_week=2, start_time=time(9, 0), duration_hours=2),
-        RegularSchedule(student_id=s2.id, therapist_id=t2.id, day_of_week=5, start_time=time(13, 0), duration_hours=1.5),
-        RegularSchedule(student_id=s2.id, therapist_id=t2.id, day_of_week=6, start_time=time(13, 0), duration_hours=1.5),
+        RegularSchedule(student_id=s1.id, therapist_id=t1.id, day_of_week=0, start_time=time(9, 0), end_time=time(11,0), duration_hours=2),
+        RegularSchedule(student_id=s1.id, therapist_id=t1.id, day_of_week=2, start_time=time(9, 0), end_time=time(11,0), duration_hours=2),
+        RegularSchedule(student_id=s2.id, therapist_id=t2.id, day_of_week=5, start_time=time(13, 0), end_time=time(14,30), duration_hours=1.5),
+        RegularSchedule(student_id=s2.id, therapist_id=t2.id, day_of_week=6, start_time=time(13, 0), end_time=time(14,30), duration_hours=1.5),
     ])
 
     initialize_required_deposit(s1)
