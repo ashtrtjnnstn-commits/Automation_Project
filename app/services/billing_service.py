@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+
+from app.models import (
+    AssessmentDepositLedger,
+    AttendanceSession,
+    AuditLog,
+    BillingAdvice,
+    BillingCycle,
+    BillingLineItem,
+    RequiredDepositLedger,
+    Student,
+    db,
+)
+BILLABLE_STATUSES = {"Present", "Make-up", "Rescheduled"}
+
+WEEKDAY_RATE = 550.0
+WEEKEND_RATE = 600.0
+
+
+@dataclass
+class SessionTotals:
+    weekday_hours: float = 0.0
+    weekend_hours: float = 0.0
+    weekday_amount: float = 0.0
+    weekend_amount: float = 0.0
+
+
+def generate_billing_cycles_for_range(range_start: date, range_end: date) -> list[BillingCycle]:
+    cycles: list[BillingCycle] = []
+    cursor = range_start
+    while cursor <= range_end:
+        cycle_end = min(cursor + timedelta(days=14), range_end)
+        existing = BillingCycle.query.filter_by(start_date=cursor, end_date=cycle_end).first()
+        if existing:
+            cycles.append(existing)
+        else:
+            cycle = BillingCycle(
+                start_date=cursor,
+                end_date=cycle_end,
+                issue_date=cycle_end,
+                due_date=cycle_end + timedelta(days=5),
+            )
+            db.session.add(cycle)
+            db.session.flush()
+            cycles.append(cycle)
+        cursor = cycle_end + timedelta(days=1)
+    db.session.commit()
+    return cycles
+
+
+def _required_deposit_rate(student: Student) -> float:
+    """Fair blended rate from student's regular schedules."""
+    weekday_count = sum(1 for s in student.regular_schedules if s.day_of_week < 5)
+    weekend_count = sum(1 for s in student.regular_schedules if s.day_of_week >= 5)
+    total = weekday_count + weekend_count
+    if total == 0:
+        return WEEKDAY_RATE
+    return ((weekday_count * WEEKDAY_RATE) + (weekend_count * WEEKEND_RATE)) / total
+
+
+def initialize_required_deposit(student: Student) -> None:
+    if student.required_deposit_total > 0:
+        return
+    rate = _required_deposit_rate(student)
+    student.required_deposit_total = round(student.contract_hours_per_week * rate * 2, 2)
+
+
+def _session_totals(student_id: int, start_date: date, end_date: date) -> SessionTotals:
+    sessions = AttendanceSession.query.filter(
+        AttendanceSession.student_id == student_id,
+        AttendanceSession.session_date >= start_date,
+        AttendanceSession.session_date <= end_date,
+        AttendanceSession.status.in_(list(BILLABLE_STATUSES)),
+    ).all()
+    totals = SessionTotals()
+    for s in sessions:
+        if s.session_date.weekday() < 5:
+            totals.weekday_hours += s.duration_hours
+            totals.weekday_amount += s.duration_hours * WEEKDAY_RATE
+        else:
+            totals.weekend_hours += s.duration_hours
+            totals.weekend_amount += s.duration_hours * WEEKEND_RATE
+    return totals
+
+
+def _unpaid_previous_balance(student_id: int) -> float:
+    open_advices = BillingAdvice.query.filter_by(student_id=student_id, status="Open").all()
+    return round(sum(a.total_due for a in open_advices), 2)
+
+
+def _required_deposit_charge(student: Student) -> float:
+    initialize_required_deposit(student)
+    remaining = max(student.required_deposit_total - student.required_deposit_billed, 0)
+    if remaining <= 0:
+        return 0.0
+    cycle_count = RequiredDepositLedger.query.filter_by(student_id=student.id, entry_type="billed").count()
+    if cycle_count >= 4:
+        return 0.0
+    charge = round(student.required_deposit_total / 4, 2)
+    return min(charge, remaining)
+
+
+def _assessment_deposit_charge(student: Student) -> float:
+    remaining = max(student.assessment_deposit_total - student.assessment_deposit_billed, 0)
+    if remaining <= 0:
+        return 0.0
+    return min(2500.0, remaining)
+
+
+def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = None) -> list[BillingAdvice]:
+    """Generate billing advice for one cycle.
+
+    If student_id is provided, only that student is calculated.
+    """
+    cycle = BillingCycle.query.get_or_404(cycle_id)
+    if student_id:
+        students = Student.query.filter_by(id=student_id, active=True).all()
+    else:
+        students = Student.query.filter_by(active=True).all()
+
+    created: list[BillingAdvice] = []
+
+    with db.session.begin_nested():
+        for student in students:
+            totals = _session_totals(student.id, cycle.start_date, cycle.end_date)
+            subtotal = round(totals.weekday_amount + totals.weekend_amount, 2)
+            old_balance = _unpaid_previous_balance(student.id)
+            required_charge = _required_deposit_charge(student)
+            assessment_charge = _assessment_deposit_charge(student)
+            credit = student.overpayment_credit
+            total_due = round(max(subtotal + old_balance + required_charge + assessment_charge - credit, 0), 2)
+
+            advice = BillingAdvice.query.filter_by(student_id=student.id, billing_cycle_id=cycle.id).first()
+            if not advice:
+                advice = BillingAdvice(student_id=student.id, billing_cycle_id=cycle.id)
+            advice.subtotal_sessions = subtotal
+            advice.old_balance = old_balance
+            advice.overpayment_credit = credit
+            advice.required_deposit_charge = required_charge
+            advice.assessment_deposit_charge = assessment_charge
+            advice.total_due = total_due
+            advice.status = "Open"
+            db.session.add(advice)
+            db.session.flush()
+
+            BillingLineItem.query.filter_by(billing_advice_id=advice.id).delete()
+            db.session.add(BillingLineItem(billing_advice_id=advice.id, item_type="weekday", description="Weekday sessions", quantity=totals.weekday_hours, rate=WEEKDAY_RATE, amount=totals.weekday_amount))
+            db.session.add(BillingLineItem(billing_advice_id=advice.id, item_type="weekend", description="Weekend sessions", quantity=totals.weekend_hours, rate=WEEKEND_RATE, amount=totals.weekend_amount))
+            if required_charge:
+                student.required_deposit_billed += required_charge
+                db.session.add(RequiredDepositLedger(student_id=student.id, billing_cycle_id=cycle.id, billing_advice_id=advice.id, entry_type="billed", amount=required_charge))
+            if assessment_charge:
+                student.assessment_deposit_billed += assessment_charge
+                db.session.add(AssessmentDepositLedger(student_id=student.id, billing_cycle_id=cycle.id, billing_advice_id=advice.id, entry_type="billed", amount=assessment_charge))
+            student.overpayment_credit = 0.0
+            created.append(advice)
+
+        db.session.add(AuditLog(action="billing_regeneration", entity_type="BillingCycle", entity_id=cycle.id, details=f"Advices generated for {'all students' if not student_id else f'student {student_id}'}"))
+    db.session.commit()
+    return created
+
+
+def due_summary(today: date) -> dict[str, list[BillingAdvice]]:
+    due_today = BillingAdvice.query.join(BillingCycle).filter(BillingAdvice.status == "Open", BillingCycle.due_date == today).all()
+    overdue = BillingAdvice.query.join(BillingCycle).filter(BillingAdvice.status == "Open", BillingCycle.due_date < today).all()
+    upcoming = BillingAdvice.query.join(BillingCycle).filter(
+        BillingAdvice.status == "Open",
+        BillingCycle.due_date > today,
+        BillingCycle.due_date <= today + timedelta(days=3),
+    ).all()
+    return {"due_today": due_today, "overdue": overdue, "upcoming": upcoming}

@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Master Data: Students</h2>
+<h3>Add Student</h3>
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="create" />
+  <label>Name <input type="text" name="name" required /></label>
+  <label>Contract Hours/Week <input type="number" step="0.5" name="contract_hours_per_week" value="0" /></label>
+  <label>Overpayment Credit <input type="number" step="0.01" name="overpayment_credit" value="0" /></label>
+  <label>Active
+    <select name="active"><option value="1">Yes</option><option value="0">No</option></select>
+  </label>
+  <button>Save Student</button>
+</form>
+
+<h3>Existing Students</h3>
+<table>
+  <tr><th>Name</th><th>Contract Hours</th><th>Overpayment Credit</th><th>Active</th><th>Edit</th></tr>
+  {% for s in students %}
+  <tr>
+    <td>{{ s.name }}</td><td>{{ s.contract_hours_per_week }}</td><td>{{ s.overpayment_credit }}</td><td>{{ 'Yes' if s.active else 'No' }}</td>
+    <td>
+      <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="edit" />
+        <input type="hidden" name="student_id" value="{{ s.id }}" />
+        <input type="text" name="name" value="{{ s.name }}" required />
+        <input type="number" step="0.5" name="contract_hours_per_week" value="{{ s.contract_hours_per_week }}" />
+        <input type="number" step="0.01" name="overpayment_credit" value="{{ s.overpayment_credit }}" />
+        <select name="active"><option value="1" {% if s.active %}selected{% endif %}>Yes</option><option value="0" {% if not s.active %}selected{% endif %}>No</option></select>
+        <button>Update</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
