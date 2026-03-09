@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Master Data: Regular Schedules</h2>
+<h3>Add Schedule</h3>
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="create" />
+  <label>Student
+    <select name="student_id" required>{% for s in students %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+  </label>
+  <label>Therapist
+    <select name="therapist_id" required>{% for t in therapists %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}</select>
+  </label>
+  <label>Day
+    <select name="day_of_week" required>
+      <option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option>
+      <option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option>
+    </select>
+  </label>
+  <label>Start <input type="time" name="start_time" required /></label>
+  <label>End <input type="time" name="end_time" required /></label>
+  <label>Active <select name="active"><option value="1">Yes</option><option value="0">No</option></select></label>
+  <button>Save Schedule</button>
+</form>
+
+<h3>Existing Schedules</h3>
+<table>
+  <tr><th>Student</th><th>Therapist</th><th>Day</th><th>Start</th><th>End</th><th>Duration</th><th>Active</th><th>Edit</th></tr>
+  {% for sc in schedules %}
+  <tr>
+    <td>{{ sc.student.name }}</td>
+    <td>{{ sc.therapist.name }}</td>
+    <td>{{ sc.day_of_week }}</td>
+    <td>{{ sc.start_time.strftime('%H:%M') }}</td>
+    <td>{{ sc.end_time.strftime('%H:%M') if sc.end_time else '-' }}</td>
+    <td>{{ sc.duration_hours }}</td>
+    <td>{{ 'Yes' if sc.active else 'No' }}</td>
+    <td>
+      <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="edit" />
+        <input type="hidden" name="schedule_id" value="{{ sc.id }}" />
+        <select name="student_id">{% for s in students %}<option value="{{ s.id }}" {% if s.id == sc.student_id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select>
+        <select name="therapist_id">{% for t in therapists %}<option value="{{ t.id }}" {% if t.id == sc.therapist_id %}selected{% endif %}>{{ t.name }}</option>{% endfor %}</select>
+        <select name="day_of_week">
+          {% for d in range(0,7) %}<option value="{{ d }}" {% if d == sc.day_of_week %}selected{% endif %}>{{ d }}</option>{% endfor %}
+        </select>
+        <input type="time" name="start_time" value="{{ sc.start_time.strftime('%H:%M') }}" />
+        <input type="time" name="end_time" value="{{ sc.end_time.strftime('%H:%M') if sc.end_time else '' }}" />
+        <select name="active"><option value="1" {% if sc.active %}selected{% endif %}>Yes</option><option value="0" {% if not sc.active %}selected{% endif %}>No</option></select>
+        <button>Update</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
