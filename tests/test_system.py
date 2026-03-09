@@ -537,3 +537,95 @@ def test_missed_hours_summary_computation(session):
     assert summary["missed_hours"] == 1.0
     assert summary["recovered_makeup_hours"] == 0.5
     assert summary["remaining_missed_hours"] == 0.5
+
+
+def test_missed_recovery_is_student_specific(session):
+    t = Therapist(name="T-main")
+    s1 = Student(name="S-main", contract_hours_per_week=2, assigned_therapist=t)
+    s2 = Student(name="S-other", contract_hours_per_week=2, assigned_therapist=t)
+    db.session.add_all([t, s1, s2])
+    db.session.flush()
+
+    s1_missed = AttendanceSession(
+        student_id=s1.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Absent",
+        session_type="regular",
+        source_type="generated",
+    )
+    s2_makeup = AttendanceSession(
+        student_id=s2.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 6),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="makeup",
+        source_type="manual",
+    )
+    db.session.add_all([s1_missed, s2_makeup])
+    db.session.flush()
+    # Link intentionally mismatched to ensure recovery still remains student-specific.
+    db.session.add(SessionOverride(original_session_id=s1_missed.id, new_session_id=s2_makeup.id, override_type="makeup"))
+    db.session.commit()
+
+    s1_summary = missed_recovery_summary(student_id=s1.id)
+    assert s1_summary["missed_hours"] == 1.0
+    assert s1_summary["recovered_makeup_hours"] == 0.0
+    assert s1_summary["remaining_missed_hours"] == 1.0
+
+
+def test_student_b_makeup_does_not_reduce_student_a_remaining(session):
+    t = Therapist(name="T-iso")
+    s1 = Student(name="S-A", contract_hours_per_week=2, assigned_therapist=t)
+    s2 = Student(name="S-B", contract_hours_per_week=2, assigned_therapist=t)
+    db.session.add_all([t, s1, s2])
+    db.session.flush()
+
+    s1_missed = AttendanceSession(
+        student_id=s1.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Cancelled",
+        session_type="regular",
+        source_type="generated",
+    )
+    s2_missed = AttendanceSession(
+        student_id=s2.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(10, 0),
+        end_time=time(11, 0),
+        duration_hours=1,
+        status="Absent",
+        session_type="regular",
+        source_type="generated",
+    )
+    s2_makeup = AttendanceSession(
+        student_id=s2.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 6),
+        start_time=time(10, 0),
+        end_time=time(11, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="makeup",
+        source_type="manual",
+    )
+    db.session.add_all([s1_missed, s2_missed, s2_makeup])
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=s2_missed.id, new_session_id=s2_makeup.id, override_type="makeup"))
+    db.session.commit()
+
+    s1_summary = missed_recovery_summary(student_id=s1.id)
+    s2_summary = missed_recovery_summary(student_id=s2.id)
+    assert s1_summary["remaining_missed_hours"] == 1.0
+    assert s2_summary["remaining_missed_hours"] == 0.0

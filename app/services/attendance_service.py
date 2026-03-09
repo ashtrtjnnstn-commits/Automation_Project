@@ -190,11 +190,16 @@ def missed_recovery_summary(
             .all()
         ]
         if replacement_ids:
-            recovered_sessions = AttendanceSession.query.filter(
+            recovered_query = AttendanceSession.query.filter(
                 AttendanceSession.id.in_(replacement_ids),
                 AttendanceSession.session_type == "makeup",
                 AttendanceSession.status.in_(list(RENDERED_STATUSES)),
-            ).all()
+            )
+            if student_id:
+                recovered_query = recovered_query.filter(AttendanceSession.student_id == student_id)
+            if therapist_id:
+                recovered_query = recovered_query.filter(AttendanceSession.therapist_id == therapist_id)
+            recovered_sessions = recovered_query.all()
             recovered_hours = round(sum(s.duration_hours for s in recovered_sessions), 2)
             recovered_count = len(recovered_sessions)
 
