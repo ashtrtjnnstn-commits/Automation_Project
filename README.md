@@ -2,6 +2,14 @@
 
 A clean rebuild of a therapy center operations app with a local Flask server, SQLite database, browser UI, and Excel import/export.
 
+## Patch Notes
+
+### Version 9.2
+- Billing advice now respects **paid required deposit** amounts when computing new required deposit charges.
+- Billing advice now respects **paid assessment deposit** amounts when computing new assessment deposit charges.
+- Billing advice session subtotal now consistently computes billable rendered sessions (Present/Make-up/Rescheduled only) using weekday/weekend rates.
+- Payment tracker now supports editing existing payment ledger entries.
+
 ## Tech Stack
 - Python 3.11+
 - Flask + SQLAlchemy ORM

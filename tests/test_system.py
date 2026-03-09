@@ -5,7 +5,7 @@ from datetime import date, time
 import pytest
 from openpyxl import Workbook
 
-from app.models import AdminStaff, AttendanceSession, BillingAdvice, Payment, RegularSchedule, Student, Therapist, db
+from app.models import AdminStaff, AttendanceSession, BillingAdvice, Payment, RegularSchedule, SessionOverride, Student, Therapist, db
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, weekly_student_hours, weekly_therapist_hours
 from app.services.billing_service import WEEKDAY_RATE, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import import_students_and_schedules
@@ -93,6 +93,62 @@ def test_assessment_deposit_tracking(session):
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
     advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
     assert advice.assessment_deposit_charge == 2500.0
+
+
+def test_required_deposit_charge_respects_paid_amount(session):
+    s, _ = setup_basic()
+    s.required_deposit_total = 10000
+    s.required_deposit_billed = 2500
+    s.required_deposit_paid = 9500
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.required_deposit_charge == 500
+
+
+def test_assessment_deposit_charge_respects_paid_amount(session):
+    s, _ = setup_basic()
+    s.assessment_deposit_total = 5000
+    s.assessment_deposit_billed = 0
+    s.assessment_deposit_paid = 4900
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.assessment_deposit_charge == 100
+
+
+def test_billing_excludes_replaced_original_session(session):
+    s, t = setup_basic()
+    original = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        source_type="generated",
+    )
+    replacement = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 6),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Rescheduled",
+        source_type="manual",
+    )
+    db.session.add_all([original, replacement])
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=original.id, new_session_id=replacement.id, override_type="reschedule"))
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.subtotal_sessions == 550.0
 
 
 def test_partial_payment_allocation(session):
@@ -223,6 +279,43 @@ def test_payments_tracker_filters_current_month(session, client):
     assert res.status_code == 200
     assert b"2026-01-10" in res.data
     assert b"2026-02-10" not in res.data
+
+
+def test_edit_payment_entry(session, client):
+    s, _ = setup_basic()
+    admin = AdminStaff(name="Receiver Edit")
+    db.session.add(admin)
+    db.session.flush()
+    p = Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name="Before", mode_of_transfer="Cash")
+    db.session.add(p)
+    db.session.commit()
+
+    res = client.post(
+        f"/payments/{p.id}/edit",
+        data={
+            "payment_date": "2026-01-12",
+            "client_guardian_name": "After",
+            "student_id": str(s.id),
+            "purpose": "Partial Payment",
+            "billing_period_start": "2026-01-01",
+            "billing_period_end": "2026-01-15",
+            "total_hours_rendered": "3",
+            "amount": "750",
+            "received_by_admin_id": str(admin.id),
+            "overpayment_amount": "10",
+            "balance_after_payment": "20",
+            "mode_of_transfer": "GCash",
+            "notes": "edited",
+        },
+        follow_redirects=True,
+    )
+    assert res.status_code == 200
+    db.session.refresh(p)
+    assert p.payment_date == date(2026, 1, 12)
+    assert p.client_guardian_name == "After"
+    assert p.purpose == "Partial Payment"
+    assert p.amount == 750
+    assert p.mode_of_transfer == "GCash"
 
 
 def test_master_data_student_crud_page(session, client):

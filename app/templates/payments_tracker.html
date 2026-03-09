@@ -42,6 +42,7 @@
     <th>Overpayment</th>
     <th>Balance</th>
     <th>Mode of Transfer</th>
+    <th>Actions</th>
   </tr>
   {% for p in payments %}
   <tr>
@@ -62,9 +63,10 @@
     <td>{{ p.overpayment_amount }}</td>
     <td>{{ p.balance_after_payment }}</td>
     <td>{{ p.mode_of_transfer }}</td>
+    <td><a href="{{ url_for('web.edit_payment', payment_id=p.id) }}">Edit</a></td>
   </tr>
   {% else %}
-  <tr><td colspan="11">No payment records.</td></tr>
+  <tr><td colspan="12">No payment records.</td></tr>
   {% endfor %}
 </table>
 {% endblock %}

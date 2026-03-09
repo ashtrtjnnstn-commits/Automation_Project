@@ -11,6 +11,7 @@ from app.models import (
     BillingCycle,
     BillingLineItem,
     RequiredDepositLedger,
+    SessionOverride,
     Student,
     db,
 )
@@ -69,14 +70,24 @@ def initialize_required_deposit(student: Student) -> None:
 
 
 def _session_totals(student_id: int, start_date: date, end_date: date) -> SessionTotals:
+    replaced_ids = {
+        row[0]
+        for row in db.session.query(SessionOverride.original_session_id)
+        .filter(SessionOverride.original_session_id.isnot(None))
+        .all()
+    }
+
     sessions = AttendanceSession.query.filter(
         AttendanceSession.student_id == student_id,
         AttendanceSession.session_date >= start_date,
         AttendanceSession.session_date <= end_date,
         AttendanceSession.status.in_(list(BILLABLE_STATUSES)),
     ).all()
+
     totals = SessionTotals()
     for s in sessions:
+        if s.id in replaced_ids:
+            continue
         if s.session_date.weekday() < 5:
             totals.weekday_hours += s.duration_hours
             totals.weekday_amount += s.duration_hours * WEEKDAY_RATE
@@ -93,7 +104,9 @@ def _unpaid_previous_balance(student_id: int) -> float:
 
 def _required_deposit_charge(student: Student) -> float:
     initialize_required_deposit(student)
-    remaining = max(student.required_deposit_total - student.required_deposit_billed, 0)
+    remaining_by_billed = max(student.required_deposit_total - student.required_deposit_billed, 0)
+    remaining_by_paid = max(student.required_deposit_total - student.required_deposit_paid, 0)
+    remaining = min(remaining_by_billed, remaining_by_paid)
     if remaining <= 0:
         return 0.0
     cycle_count = RequiredDepositLedger.query.filter_by(student_id=student.id, entry_type="billed").count()
@@ -104,7 +117,9 @@ def _required_deposit_charge(student: Student) -> float:
 
 
 def _assessment_deposit_charge(student: Student) -> float:
-    remaining = max(student.assessment_deposit_total - student.assessment_deposit_billed, 0)
+    remaining_by_billed = max(student.assessment_deposit_total - student.assessment_deposit_billed, 0)
+    remaining_by_paid = max(student.assessment_deposit_total - student.assessment_deposit_paid, 0)
+    remaining = min(remaining_by_billed, remaining_by_paid)
     if remaining <= 0:
         return 0.0
     return min(2500.0, remaining)

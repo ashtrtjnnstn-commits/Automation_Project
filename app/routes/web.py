@@ -297,10 +297,47 @@ def payments_tracker():
     return render_template(
         "payments_tracker.html",
         payments=payments,
+        students=Student.query.order_by(Student.name).all(),
+        admins=AdminStaff.query.filter_by(active=True).order_by(AdminStaff.name).all(),
         view=view,
         month=month,
         year=year,
         archived_groups=archived_groups,
+    )
+
+
+@web_bp.route("/payments/<int:payment_id>/edit", methods=["GET", "POST"])
+def edit_payment(payment_id: int):
+    payment = Payment.query.get_or_404(payment_id)
+
+    if request.method == "POST":
+        payment_date = request.form.get("payment_date")
+        billing_period_start = request.form.get("billing_period_start")
+        billing_period_end = request.form.get("billing_period_end")
+
+        payment.payment_date = datetime.strptime(payment_date, "%Y-%m-%d").date() if payment_date else payment.payment_date
+        payment.client_guardian_name = request.form.get("client_guardian_name", "")
+        payment.student_id = int(request.form["student_id"])
+        payment.purpose = request.form.get("purpose", "Therapy")
+        payment.billing_period_start = datetime.strptime(billing_period_start, "%Y-%m-%d").date() if billing_period_start else None
+        payment.billing_period_end = datetime.strptime(billing_period_end, "%Y-%m-%d").date() if billing_period_end else None
+        payment.total_hours_rendered = float(request.form.get("total_hours_rendered", 0) or 0)
+        payment.amount = float(request.form.get("amount", payment.amount) or 0)
+        payment.received_by_admin_id = request.form.get("received_by_admin_id", type=int)
+        payment.overpayment_amount = float(request.form.get("overpayment_amount", 0) or 0)
+        payment.balance_after_payment = float(request.form.get("balance_after_payment", 0) or 0)
+        payment.mode_of_transfer = request.form.get("mode_of_transfer", "Cash")
+        payment.notes = request.form.get("notes", "")
+
+        db.session.commit()
+        flash(f"Payment entry {payment.id} updated.", "success")
+        return redirect(url_for("web.payments_tracker"))
+
+    return render_template(
+        "payments_edit.html",
+        payment=payment,
+        students=Student.query.order_by(Student.name).all(),
+        admins=AdminStaff.query.filter_by(active=True).order_by(AdminStaff.name).all(),
     )
 
 
