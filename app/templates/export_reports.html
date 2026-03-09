@@ -5,7 +5,35 @@
   <li><a href="{{ url_for('web.export_page', kind='attendance') }}">Attendance Summary</a></li>
   <li><a href="{{ url_for('web.export_page', kind='admin') }}">Admin Attendance</a></li>
   <li><a href="{{ url_for('web.export_page', kind='therapist-weekly') }}">Therapist Weekly Hours</a></li>
-  <li><a href="{{ url_for('web.export_page', kind='billing') }}">Billing Advice</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='billing') }}">Billing Advice (with regular/make-up rendered hours)</a></li>
   <li><a href="{{ url_for('web.export_page', kind='payments') }}">Payment Ledger</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='required-deposit-history') }}">Required Deposit Payment History (All Students)</a></li>
+  <li><a href="{{ url_for('web.export_page', kind='assessment-deposit-history') }}">Assessment Deposit Payment History (All Students)</a></li>
 </ul>
+
+<h3>Required Deposit Payment History (Per Student)</h3>
+<form method="get" action="{{ url_for('web.export_page', kind='required-deposit-history') }}" class="inline-form">
+  <label>Student
+    <select name="student_id" required>
+      <option value="">-- Select student --</option>
+      {% for s in students %}
+      <option value="{{ s.id }}">{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button>Export Required Deposit History</button>
+</form>
+
+<h3>Assessment Deposit Payment History (Per Student)</h3>
+<form method="get" action="{{ url_for('web.export_page', kind='assessment-deposit-history') }}" class="inline-form">
+  <label>Student
+    <select name="student_id" required>
+      <option value="">-- Select student --</option>
+      {% for s in students %}
+      <option value="{{ s.id }}">{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button>Export Assessment Deposit History</button>
+</form>
 {% endblock %}

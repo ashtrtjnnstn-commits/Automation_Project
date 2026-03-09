@@ -11,7 +11,9 @@ from app.models import (
     AttendanceSession,
     BillingAdvice,
     Payment,
+    PaymentAllocation,
     RegularSchedule,
+    SessionOverride,
     Student,
     Therapist,
     db,
@@ -188,15 +190,67 @@ def export_billing_advices(path: str) -> str:
     wb = Workbook()
     ws = wb.active
     ws.title = "Billing Advice"
-    ws.append(["Student", "Cycle Start", "Cycle End", "Issue", "Due", "Subtotal", "Old Balance", "Required Deposit", "Assessment Deposit", "Total Due", "Status"])
+    ws.append([
+        "Student",
+        "Cycle Start",
+        "Cycle End",
+        "Issue",
+        "Due",
+        "Regular Rendered Hours",
+        "Make-up Rendered Hours",
+        "Total Rendered Hours",
+        "Billable Hours",
+        "Non-billable Hours",
+        "Subtotal",
+        "Old Balance",
+        "Required Deposit",
+        "Assessment Deposit",
+        "Total Due",
+        "Status",
+    ])
+    replaced_ids = {
+        row[0]
+        for row in db.session.query(SessionOverride.original_session_id)
+        .filter(SessionOverride.original_session_id.isnot(None))
+        .all()
+    }
     for advice in BillingAdvice.query.order_by(BillingAdvice.id).all():
         cycle = advice.billing_cycle
+        sessions = AttendanceSession.query.filter(
+            AttendanceSession.student_id == advice.student_id,
+            AttendanceSession.session_date >= cycle.start_date,
+            AttendanceSession.session_date <= cycle.end_date,
+            AttendanceSession.status.in_(["Present", "Make-up", "Rescheduled", "Non-billable"]),
+        ).all()
+
+        regular_hours = 0.0
+        makeup_hours = 0.0
+        billable_hours = 0.0
+        non_billable_hours = 0.0
+        for sess in sessions:
+            if sess.id in replaced_ids:
+                continue
+            if sess.status in {"Present", "Make-up", "Rescheduled"}:
+                billable_hours += sess.duration_hours
+                if sess.session_type == "makeup":
+                    makeup_hours += sess.duration_hours
+                else:
+                    regular_hours += sess.duration_hours
+            elif sess.status == "Non-billable":
+                non_billable_hours += sess.duration_hours
+
+        total_rendered_hours = regular_hours + makeup_hours + non_billable_hours
         ws.append([
             advice.student.name,
             cycle.start_date.isoformat(),
             cycle.end_date.isoformat(),
             cycle.issue_date.isoformat(),
             cycle.due_date.isoformat(),
+            round(regular_hours, 2),
+            round(makeup_hours, 2),
+            round(total_rendered_hours, 2),
+            round(billable_hours, 2),
+            round(non_billable_hours, 2),
             advice.subtotal_sessions,
             advice.old_balance,
             advice.required_deposit_charge,
@@ -228,3 +282,60 @@ def export_payment_ledger(path: str) -> str:
         else:
             ws.append([p.id, p.payment_date.isoformat(), p.student.name, p.amount, "", 0, "", p.notes])
     return _save_workbook(wb, path)
+
+
+def _export_deposit_payment_history(path: str, allocation_type: str, student_id: int | None = None) -> str:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Deposit Payments"
+    ws.append([
+        "Payment ID",
+        "Payment Date",
+        "Client/Guardian",
+        "Student",
+        "Amount Paid",
+        "Received By",
+        "Purpose",
+        "Billing Period Start",
+        "Billing Period End",
+        "Mode of Transfer",
+        "Notes",
+        "Allocation Type",
+        "Allocation Amount",
+        "Billing Advice ID",
+        "Billing Cycle ID",
+    ])
+
+    query = PaymentAllocation.query.filter_by(allocation_type=allocation_type).join(Payment, PaymentAllocation.payment_id == Payment.id)
+    if student_id:
+        query = query.filter(Payment.student_id == student_id)
+
+    for alloc in query.order_by(Payment.payment_date, Payment.id).all():
+        payment = alloc.payment
+        advice = BillingAdvice.query.get(alloc.billing_advice_id) if alloc.billing_advice_id else None
+        ws.append([
+            payment.id,
+            payment.payment_date.isoformat(),
+            payment.client_guardian_name,
+            payment.student.name,
+            payment.amount,
+            payment.received_by_admin.name if payment.received_by_admin else "",
+            payment.purpose,
+            payment.billing_period_start.isoformat() if payment.billing_period_start else "",
+            payment.billing_period_end.isoformat() if payment.billing_period_end else "",
+            payment.mode_of_transfer,
+            payment.notes,
+            alloc.allocation_type,
+            alloc.amount,
+            alloc.billing_advice_id or "",
+            advice.billing_cycle_id if advice else "",
+        ])
+    return _save_workbook(wb, path)
+
+
+def export_required_deposit_payment_history(path: str, student_id: int | None = None) -> str:
+    return _export_deposit_payment_history(path, allocation_type="required_deposit", student_id=student_id)
+
+
+def export_assessment_deposit_payment_history(path: str, student_id: int | None = None) -> str:
+    return _export_deposit_payment_history(path, allocation_type="assessment_deposit", student_id=student_id)

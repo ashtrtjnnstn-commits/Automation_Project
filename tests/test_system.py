@@ -3,12 +3,17 @@ from __future__ import annotations
 from datetime import date, time
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from app.models import AdminStaff, AttendanceSession, BillingAdvice, Payment, RegularSchedule, SessionOverride, Student, Therapist, db
-from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, weekly_student_hours, weekly_therapist_hours
+from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, missed_recovery_summary, weekly_student_hours, weekly_therapist_hours
 from app.services.billing_service import WEEKDAY_RATE, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import import_students_and_schedules
+from app.services.import_export_service import (
+    export_assessment_deposit_payment_history,
+    export_billing_advices,
+    export_required_deposit_payment_history,
+)
 from app.services.payment_service import record_payment
 
 
@@ -382,3 +387,153 @@ def test_weekly_report_archive_prevents_duplicate(session, client):
     res2 = client.post("/reports/weekly", data={"date": "2026-01-05", "action": "archive_week", "note": "b"}, follow_redirects=True)
     assert res2.status_code == 200
     assert b"already archived" in res2.data
+
+
+def test_required_deposit_export_includes_expected_row_and_columns_for_student(session, tmp_path):
+    s, _ = setup_basic()
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    record_payment(s.id, advice.required_deposit_charge, date(2026, 1, 16), client_guardian_name="Guardian A", purpose="Required Deposit", mode_of_transfer="GCash")
+
+    output = export_required_deposit_payment_history(str(tmp_path / "required_one.xlsx"), student_id=s.id)
+    wb = load_workbook(output)
+    ws = wb.active
+    headers = [c.value for c in ws[1]]
+    assert "Payment Date" in headers
+    assert "Client/Guardian" in headers
+    assert "Allocation Amount" in headers
+    assert ws.max_row >= 2
+    assert ws.cell(row=2, column=headers.index("Student") + 1).value == s.name
+
+
+def test_required_deposit_export_supports_all_students(session, tmp_path):
+    s1, _ = setup_basic()
+    s2 = Student(name="S-2", contract_hours_per_week=2)
+    db.session.add(s2)
+    db.session.commit()
+
+    c = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    a1 = generate_billing_advices_for_cycle(c.id, student_id=s1.id)[0]
+    a2 = generate_billing_advices_for_cycle(c.id, student_id=s2.id)[0]
+    record_payment(s1.id, a1.required_deposit_charge, date(2026, 1, 16), purpose="Required Deposit")
+    record_payment(s2.id, a2.required_deposit_charge, date(2026, 1, 16), purpose="Required Deposit")
+
+    output = export_required_deposit_payment_history(str(tmp_path / "required_all.xlsx"))
+    ws = load_workbook(output).active
+    names = {ws.cell(row=i, column=4).value for i in range(2, ws.max_row + 1)}
+    assert s1.name in names
+    assert s2.name in names
+
+
+def test_assessment_deposit_export_includes_expected_row_and_columns_for_student(session, tmp_path):
+    s, _ = setup_basic()
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    record_payment(s.id, advice.assessment_deposit_charge, date(2026, 1, 16), client_guardian_name="Guardian B", purpose="Assessment Deposit", mode_of_transfer="Bank Transfer")
+
+    output = export_assessment_deposit_payment_history(str(tmp_path / "assessment_one.xlsx"), student_id=s.id)
+    wb = load_workbook(output)
+    ws = wb.active
+    headers = [c.value for c in ws[1]]
+    assert "Payment Date" in headers
+    assert "Mode of Transfer" in headers
+    assert "Allocation Amount" in headers
+    assert ws.max_row >= 2
+    assert ws.cell(row=2, column=headers.index("Student") + 1).value == s.name
+
+
+def test_assessment_deposit_export_supports_all_students(session, tmp_path):
+    s1, _ = setup_basic()
+    s2 = Student(name="S-3", contract_hours_per_week=2)
+    db.session.add(s2)
+    db.session.commit()
+
+    c = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    a1 = generate_billing_advices_for_cycle(c.id, student_id=s1.id)[0]
+    a2 = generate_billing_advices_for_cycle(c.id, student_id=s2.id)[0]
+    record_payment(s1.id, a1.assessment_deposit_charge, date(2026, 1, 16), purpose="Assessment Deposit")
+    record_payment(s2.id, a2.assessment_deposit_charge, date(2026, 1, 16), purpose="Assessment Deposit")
+
+    output = export_assessment_deposit_payment_history(str(tmp_path / "assessment_all.xlsx"))
+    ws = load_workbook(output).active
+    names = {ws.cell(row=i, column=4).value for i in range(2, ws.max_row + 1)}
+    assert s1.name in names
+    assert s2.name in names
+
+
+def test_billing_export_includes_regular_and_makeup_hours_columns(session, tmp_path):
+    s, t = setup_basic()
+    original = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Cancelled",
+        session_type="regular",
+        source_type="generated",
+    )
+    makeup = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 6),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="makeup",
+        source_type="manual",
+    )
+    db.session.add_all([original, makeup])
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=original.id, new_session_id=makeup.id, override_type="makeup"))
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    generate_billing_advices_for_cycle(cycle.id, student_id=s.id)
+
+    output = export_billing_advices(str(tmp_path / "billing.xlsx"))
+    ws = load_workbook(output).active
+    headers = [c.value for c in ws[1]]
+    assert "Regular Rendered Hours" in headers
+    assert "Make-up Rendered Hours" in headers
+    reg_col = headers.index("Regular Rendered Hours") + 1
+    make_col = headers.index("Make-up Rendered Hours") + 1
+    assert ws.cell(row=2, column=reg_col).value == 0
+    assert ws.cell(row=2, column=make_col).value == 1
+
+
+def test_missed_hours_summary_computation(session):
+    s, t = setup_basic()
+    missed = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Absent",
+        session_type="regular",
+        source_type="generated",
+    )
+    recovered = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 6),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=0.5,
+        status="Present",
+        session_type="makeup",
+        source_type="manual",
+    )
+    db.session.add_all([missed, recovered])
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=missed.id, new_session_id=recovered.id, override_type="makeup"))
+    db.session.commit()
+
+    summary = missed_recovery_summary(student_id=s.id)
+    assert summary["missed_hours"] == 1.0
+    assert summary["recovered_makeup_hours"] == 0.5
+    assert summary["remaining_missed_hours"] == 0.5

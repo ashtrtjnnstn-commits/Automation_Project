@@ -4,6 +4,12 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 
 ## Patch Notes
 
+### Version 9.3
+- Added Excel export for Required Deposit payment history (all students and per student).
+- Added Excel export for Assessment Deposit payment history (all students and per student).
+- Billing Advice export now includes separate rendered hours columns for regular vs make-up sessions.
+- Added missed-vs-recovered make-up hours summary (missed, recovered, remaining) in weekly reports and student profile.
+
 ### Version 9.2
 - Billing advice now respects **paid required deposit** amounts when computing new required deposit charges.
 - Billing advice now respects **paid assessment deposit** amounts when computing new assessment deposit charges.
@@ -74,7 +80,7 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 ### Attendance
 - Monthly session generation from normalized `RegularSchedule` records.
 - Calendar-style monthly list grouped by date.
-- Session statuses: Present, Absent, Cancelled, Make-up, Rescheduled, No Show.
+- Session statuses: Present, Absent, Cancelled, Make-up, Rescheduled, No Show, Non-billable.
 - Make-up/override flow with audit trail and linked override records.
 - Weekly rendered hour summaries for students and therapists.
 - Admin attendance tracking and summary support.

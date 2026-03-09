@@ -9,6 +9,7 @@ from sqlalchemy import and_
 from app.models import AttendanceSession, AuditLog, RegularSchedule, SessionOverride, db
 
 RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled", "Non-billable"}
+MISSED_STATUSES = {"Absent", "Rescheduled", "Cancelled"}
 
 
 def _time_add(start: time, duration_hours: float) -> time:
@@ -157,3 +158,50 @@ def weekly_therapist_hours(start_date: date, end_date: date) -> dict[int, float]
     for r in rows:
         result[r.therapist_id] += r.duration_hours
     return dict(result)
+
+
+def missed_recovery_summary(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    student_id: int | None = None,
+    therapist_id: int | None = None,
+) -> dict[str, float]:
+    missed_query = AttendanceSession.query.filter(AttendanceSession.status.in_(list(MISSED_STATUSES)))
+    if start_date:
+        missed_query = missed_query.filter(AttendanceSession.session_date >= start_date)
+    if end_date:
+        missed_query = missed_query.filter(AttendanceSession.session_date <= end_date)
+    if student_id:
+        missed_query = missed_query.filter(AttendanceSession.student_id == student_id)
+    if therapist_id:
+        missed_query = missed_query.filter(AttendanceSession.therapist_id == therapist_id)
+
+    missed_sessions = missed_query.all()
+    missed_ids = [s.id for s in missed_sessions]
+    missed_hours = round(sum(s.duration_hours for s in missed_sessions), 2)
+
+    recovered_hours = 0.0
+    recovered_count = 0
+    if missed_ids:
+        replacement_ids = [
+            row[0]
+            for row in db.session.query(SessionOverride.new_session_id)
+            .filter(SessionOverride.original_session_id.in_(missed_ids))
+            .all()
+        ]
+        if replacement_ids:
+            recovered_sessions = AttendanceSession.query.filter(
+                AttendanceSession.id.in_(replacement_ids),
+                AttendanceSession.session_type == "makeup",
+                AttendanceSession.status.in_(list(RENDERED_STATUSES)),
+            ).all()
+            recovered_hours = round(sum(s.duration_hours for s in recovered_sessions), 2)
+            recovered_count = len(recovered_sessions)
+
+    return {
+        "missed_sessions": len(missed_sessions),
+        "missed_hours": missed_hours,
+        "recovered_makeup_sessions": recovered_count,
+        "recovered_makeup_hours": recovered_hours,
+        "remaining_missed_hours": round(max(missed_hours - recovered_hours, 0), 2),
+    }

@@ -20,6 +20,13 @@
 <h3>Admin Hours</h3>
 <ul>{% for aid, hrs in admin_hours.items() %}<li>{{ admins[aid].name }}: {{ hrs }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
 
+<h3>Missed vs Make-up Recovery (Week)</h3>
+<ul>
+  <li>Missed Hours (Absent/Rescheduled/Cancelled): {{ missed_summary.missed_hours }}</li>
+  <li>Recovered Make-up Hours: {{ missed_summary.recovered_makeup_hours }}</li>
+  <li>Remaining Missed Hours: {{ missed_summary.remaining_missed_hours }}</li>
+</ul>
+
 <h3>Archived Weekly Reports</h3>
 <ul>
   {% for arc in archives %}

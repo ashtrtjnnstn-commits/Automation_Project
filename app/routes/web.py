@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.services.admin_service import admin_hours_summary
 from app.services.attendance_service import (
+    missed_recovery_summary,
     RENDERED_STATUSES,
     create_makeup_session,
     generate_monthly_sessions,
@@ -34,10 +35,12 @@ from app.services.attendance_service import (
 )
 from app.services.billing_service import due_summary, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import (
+    export_assessment_deposit_payment_history,
     export_admin_attendance,
     export_attendance_summary,
     export_billing_advices,
     export_payment_ledger,
+    export_required_deposit_payment_history,
     export_therapist_weekly_hours,
     import_admin_staff,
     import_students_and_schedules,
@@ -111,7 +114,8 @@ def student_profile(student_id: int):
     student = Student.query.get_or_404(student_id)
     sessions = AttendanceSession.query.filter_by(student_id=student.id).order_by(AttendanceSession.session_date.desc()).limit(20).all()
     open_advices = BillingAdvice.query.filter_by(student_id=student.id, status="Open").all()
-    return render_template("student_profile.html", student=student, sessions=sessions, open_advices=open_advices)
+    missed_summary = missed_recovery_summary(student_id=student.id)
+    return render_template("student_profile.html", student=student, sessions=sessions, open_advices=open_advices, missed_summary=missed_summary)
 
 
 @web_bp.route("/therapists/<int:therapist_id>")
@@ -155,6 +159,7 @@ def weekly_reports():
         return redirect(url_for("web.weekly_reports", date=base.isoformat()))
 
     archives = WeeklyReportArchive.query.order_by(WeeklyReportArchive.week_start.desc()).limit(20).all()
+    missed_summary = missed_recovery_summary(start_date=start, end_date=end)
     return render_template(
         "weekly_reports.html",
         start=start,
@@ -167,6 +172,7 @@ def weekly_reports():
         therapists={t.id: t for t in Therapist.query.all()},
         admins={a.id: a for a in AdminStaff.query.all()},
         archives=archives,
+        missed_summary=missed_summary,
     )
 
 
@@ -179,7 +185,7 @@ def weekly_archive_view(archive_id: int):
 
 @web_bp.route("/reports/export")
 def export_reports_page():
-    return render_template("export_reports.html")
+    return render_template("export_reports.html", students=Student.query.filter_by(active=True).order_by(Student.name).all())
 
 
 @web_bp.route("/admin-attendance", methods=["GET", "POST"])
@@ -584,6 +590,7 @@ def import_page():
 @web_bp.route("/export/<string:kind>")
 def export_page(kind: str):
     Path("exports").mkdir(exist_ok=True)
+    student_id = request.args.get("student_id", type=int)
     try:
         if kind == "attendance":
             path = export_attendance_summary("exports/attendance.xlsx")
@@ -593,6 +600,12 @@ def export_page(kind: str):
             path = export_billing_advices("exports/billing_advices.xlsx")
         elif kind == "payments":
             path = export_payment_ledger("exports/payment_ledger.xlsx")
+        elif kind == "required-deposit-history":
+            suffix = f"_student_{student_id}" if student_id else "_all"
+            path = export_required_deposit_payment_history(f"exports/required_deposit_history{suffix}.xlsx", student_id=student_id)
+        elif kind == "assessment-deposit-history":
+            suffix = f"_student_{student_id}" if student_id else "_all"
+            path = export_assessment_deposit_payment_history(f"exports/assessment_deposit_history{suffix}.xlsx", student_id=student_id)
         elif kind == "therapist-weekly":
             today = date.today()
             start, end = week_bounds(today)
