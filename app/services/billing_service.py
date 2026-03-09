@@ -14,7 +14,7 @@ from app.models import (
     Student,
     db,
 )
-from app.services.attendance_service import RENDERED_STATUSES
+BILLABLE_STATUSES = {"Present", "Make-up", "Rescheduled"}
 
 WEEKDAY_RATE = 550.0
 WEEKEND_RATE = 600.0
@@ -73,7 +73,7 @@ def _session_totals(student_id: int, start_date: date, end_date: date) -> Sessio
         AttendanceSession.student_id == student_id,
         AttendanceSession.session_date >= start_date,
         AttendanceSession.session_date <= end_date,
-        AttendanceSession.status.in_(list(RENDERED_STATUSES)),
+        AttendanceSession.status.in_(list(BILLABLE_STATUSES)),
     ).all()
     totals = SessionTotals()
     for s in sessions:

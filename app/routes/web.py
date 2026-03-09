@@ -49,7 +49,7 @@ from app.utils.date_utils import week_bounds
 
 web_bp = Blueprint("web", __name__)
 
-ATTENDANCE_STATUSES = ["Present", "Absent", "Cancelled", "Make-up", "Rescheduled", "No Show"]
+ATTENDANCE_STATUSES = ["Present", "Absent", "Cancelled", "Make-up", "Rescheduled", "No Show", "Non-billable"]
 
 
 @web_bp.route("/")
@@ -447,7 +447,47 @@ def master_schedules():
         schedules=RegularSchedule.query.order_by(RegularSchedule.day_of_week, RegularSchedule.start_time).all(),
         students=Student.query.order_by(Student.name).all(),
         therapists=Therapist.query.order_by(Therapist.name).all(),
+        active_students=Student.query.filter_by(active=True).order_by(Student.name).all(),
+        active_therapists=Therapist.query.filter_by(active=True).order_by(Therapist.name).all(),
     )
+
+
+
+
+@web_bp.post("/master/students/<int:student_id>/deactivate")
+def deactivate_student(student_id: int):
+    student = Student.query.get_or_404(student_id)
+    student.active = False
+    db.session.commit()
+    flash("Student deactivated.", "success")
+    return redirect(url_for("web.master_students"))
+
+
+@web_bp.post("/master/therapists/<int:therapist_id>/deactivate")
+def deactivate_therapist(therapist_id: int):
+    therapist = Therapist.query.get_or_404(therapist_id)
+    therapist.active = False
+    db.session.commit()
+    flash("Therapist deactivated.", "success")
+    return redirect(url_for("web.master_therapists"))
+
+
+@web_bp.post("/master/admins/<int:admin_id>/deactivate")
+def deactivate_admin(admin_id: int):
+    admin = AdminStaff.query.get_or_404(admin_id)
+    admin.active = False
+    db.session.commit()
+    flash("Admin deactivated.", "success")
+    return redirect(url_for("web.master_admins"))
+
+
+@web_bp.post("/master/schedules/<int:schedule_id>/deactivate")
+def deactivate_schedule(schedule_id: int):
+    sched = RegularSchedule.query.get_or_404(schedule_id)
+    sched.active = False
+    db.session.commit()
+    flash("Schedule deactivated.", "success")
+    return redirect(url_for("web.master_schedules"))
 
 
 @web_bp.route("/import", methods=["GET", "POST"])

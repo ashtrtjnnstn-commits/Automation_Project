@@ -8,7 +8,7 @@ from sqlalchemy import and_
 
 from app.models import AttendanceSession, AuditLog, RegularSchedule, SessionOverride, db
 
-RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled"}
+RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled", "Non-billable"}
 
 
 def _time_add(start: time, duration_hours: float) -> time:
@@ -124,12 +124,27 @@ def get_month_sessions(year: int, month: int, therapist_id: int | None = None, s
     return grouped
 
 
-def weekly_student_hours(start_date: date, end_date: date) -> dict[int, float]:
-    rows = AttendanceSession.query.filter(
+
+
+def _effective_rendered_sessions(start_date: date, end_date: date):
+    replaced_ids = {
+        row[0]
+        for row in db.session.query(SessionOverride.original_session_id)
+        .filter(SessionOverride.original_session_id.isnot(None))
+        .all()
+    }
+
+    sessions = AttendanceSession.query.filter(
         AttendanceSession.session_date >= start_date,
         AttendanceSession.session_date <= end_date,
         AttendanceSession.status.in_(list(RENDERED_STATUSES)),
     ).all()
+
+    return [s for s in sessions if s.id not in replaced_ids]
+
+
+def weekly_student_hours(start_date: date, end_date: date) -> dict[int, float]:
+    rows = _effective_rendered_sessions(start_date, end_date)
     result: dict[int, float] = defaultdict(float)
     for r in rows:
         result[r.student_id] += r.duration_hours
@@ -137,11 +152,7 @@ def weekly_student_hours(start_date: date, end_date: date) -> dict[int, float]:
 
 
 def weekly_therapist_hours(start_date: date, end_date: date) -> dict[int, float]:
-    rows = AttendanceSession.query.filter(
-        AttendanceSession.session_date >= start_date,
-        AttendanceSession.session_date <= end_date,
-        AttendanceSession.status.in_(list(RENDERED_STATUSES)),
-    ).all()
+    rows = _effective_rendered_sessions(start_date, end_date)
     result: dict[int, float] = defaultdict(float)
     for r in rows:
         result[r.therapist_id] += r.duration_hours
