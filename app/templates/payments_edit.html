@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Edit Payment Entry #{{ payment.id }}</h2>
+<form method="post" class="inline-form">
+  <label>Date <input type="date" name="payment_date" value="{{ payment.payment_date }}" required /></label>
+  <label>Name of Client / Guardian <input name="client_guardian_name" value="{{ payment.client_guardian_name }}" /></label>
+  <label>Student
+    <select name="student_id" required>
+      {% for s in students %}
+      <option value="{{ s.id }}" {% if s.id == payment.student_id %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Purpose
+    <select name="purpose">
+      {% for p in ['Therapy','Required Deposit','Assessment Deposit','Partial Payment'] %}
+      <option {% if payment.purpose == p %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Billing Period Start <input type="date" name="billing_period_start" value="{{ payment.billing_period_start or '' }}" /></label>
+  <label>Billing Period End <input type="date" name="billing_period_end" value="{{ payment.billing_period_end or '' }}" /></label>
+  <label>Total Hours Rendered <input type="number" step="0.25" min="0" name="total_hours_rendered" value="{{ payment.total_hours_rendered }}" /></label>
+  <label>Amount Paid <input type="number" step="0.01" min="0" name="amount" value="{{ payment.amount }}" required /></label>
+  <label>Received By
+    <select name="received_by_admin_id">
+      <option value="">--</option>
+      {% for a in admins %}
+      <option value="{{ a.id }}" {% if payment.received_by_admin_id == a.id %}selected{% endif %}>{{ a.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Overpayment <input type="number" step="0.01" min="0" name="overpayment_amount" value="{{ payment.overpayment_amount }}" /></label>
+  <label>Balance <input type="number" step="0.01" min="0" name="balance_after_payment" value="{{ payment.balance_after_payment }}" /></label>
+  <label>Mode of Transfer
+    <select name="mode_of_transfer">
+      {% for mode in ['Cash','Bank Transfer','GCash','Maya','Cheque'] %}
+      <option {% if payment.mode_of_transfer == mode %}selected{% endif %}>{{ mode }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Notes <input name="notes" value="{{ payment.notes or '' }}" /></label>
+  <button>Save Changes</button>
+  <a href="{{ url_for('web.payments_tracker') }}">Cancel</a>
+</form>
+{% endblock %}
