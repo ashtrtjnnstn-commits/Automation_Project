@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Master Data: Therapists</h2>
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="create" />
+  <label>Name <input type="text" name="name" required /></label>
+  <label>Active <select name="active"><option value="1">Yes</option><option value="0">No</option></select></label>
+  <button>Save Therapist</button>
+</form>
+<table>
+  <tr><th>Name</th><th>Active</th><th>Edit</th></tr>
+  {% for t in therapists %}
+  <tr>
+    <td>{{ t.name }}</td><td>{{ 'Yes' if t.active else 'No' }}</td>
+    <td>
+      <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="edit" />
+        <input type="hidden" name="therapist_id" value="{{ t.id }}" />
+        <input type="text" name="name" value="{{ t.name }}" required />
+        <select name="active"><option value="1" {% if t.active %}selected{% endif %}>Yes</option><option value="0" {% if not t.active %}selected{% endif %}>No</option></select>
+        <button>Update</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Student Profile: {{ student.name }}</h2>
+<p>Assigned therapist: {{ student.assigned_therapist.name if student.assigned_therapist else 'Not assigned' }}</p>
+<p>Contract hours/week: {{ student.contract_hours_per_week }}</p>
+<p>Required deposit billed/paid/remaining: {{ student.required_deposit_billed }} / {{ student.required_deposit_paid }} / {{ (student.required_deposit_total - student.required_deposit_paid)|round(2) }}</p>
+<p>Assessment deposit billed/paid/remaining: {{ student.assessment_deposit_billed }} / {{ student.assessment_deposit_paid }} / {{ (student.assessment_deposit_total - student.assessment_deposit_paid)|round(2) }}</p>
+<p>Overpayment credit: {{ student.overpayment_credit }}</p>
+
+<h3>Missed vs Make-up Recovery</h3>
+<ul>
+<li>Missed Hours (Absent/Rescheduled/Cancelled): {{ missed_summary.missed_hours }}</li>
+<li>Recovered Make-up Hours: {{ missed_summary.recovered_makeup_hours }}</li>
+<li>Remaining Missed Hours: {{ missed_summary.remaining_missed_hours }}</li>
+</ul>
+
+<h3>Regular Schedule</h3>
+<ul>
+{% for rs in student.regular_schedules %}
+<li>Day {{ rs.day_of_week }} at {{ rs.start_time.strftime('%H:%M') }} ({{ rs.duration_hours }}h)</li>
+{% else %}<li>No schedules found.</li>{% endfor %}
+</ul>
+
+<h3>Open Billing Advice</h3>
+<ul>
+{% for advice in open_advices %}
+<li>{{ advice.billing_cycle.start_date }} to {{ advice.billing_cycle.end_date }}: {{ advice.total_due }}</li>
+{% else %}<li>No open advice.</li>{% endfor %}
+</ul>
+
+<h3>Recent Sessions</h3>
+<ul>
+{% for s in sessions %}
+<li>{{ s.session_date }} {{ s.start_time.strftime('%H:%M') }} - {{ s.status }} ({{ s.session_type }})</li>
+{% else %}<li>No sessions yet.</li>{% endfor %}
+</ul>
+{% endblock %}
