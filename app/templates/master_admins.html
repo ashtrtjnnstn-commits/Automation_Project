@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Master Data: Admin Staff</h2>
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="create" />
+  <label>Name <input type="text" name="name" required /></label>
+  <label>Active <select name="active"><option value="1">Yes</option><option value="0">No</option></select></label>
+  <button>Save Admin</button>
+</form>
+<table>
+  <tr><th>Name</th><th>Active</th><th>Edit</th></tr>
+  {% for a in admins %}
+  <tr>
+    <td>{{ a.name }}</td><td>{{ 'Yes' if a.active else 'No' }}</td>
+    <td>
+      <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="edit" />
+        <input type="hidden" name="admin_id" value="{{ a.id }}" />
+        <input type="text" name="name" value="{{ a.name }}" required />
+        <select name="active"><option value="1" {% if a.active %}selected{% endif %}>Yes</option><option value="0" {% if not a.active %}selected{% endif %}>No</option></select>
+        <button>Update</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

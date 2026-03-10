@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import date, datetime, time, timedelta
+from calendar import monthrange
+
+from sqlalchemy import and_
+
+from app.models import AttendanceSession, AuditLog, RegularSchedule, SessionOverride, db
+
+RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled", "Non-billable"}
+MISSED_STATUSES = {"Absent", "Rescheduled", "Cancelled"}
+
+
+def _time_add(start: time, duration_hours: float) -> time:
+    dt = datetime.combine(date.today(), start) + timedelta(hours=duration_hours)
+    return dt.time().replace(second=0, microsecond=0)
+
+
+def generate_monthly_sessions(year: int, month: int) -> int:
+    """Generate attendance sessions for all active regular schedules for a month.
+
+    Status remains blank by default for upcoming schedules until staff updates attendance.
+    """
+    _, days = monthrange(year, month)
+    created = 0
+    schedules = RegularSchedule.query.filter_by(active=True).all()
+    for schedule in schedules:
+        for day in range(1, days + 1):
+            session_date = date(year, month, day)
+            if session_date.weekday() != schedule.day_of_week:
+                continue
+            if schedule.effective_from and session_date < schedule.effective_from:
+                continue
+            if schedule.effective_to and session_date > schedule.effective_to:
+                continue
+            exists = AttendanceSession.query.filter_by(
+                student_id=schedule.student_id,
+                session_date=session_date,
+                start_time=schedule.start_time,
+                source_type="generated",
+            ).first()
+            if exists:
+                continue
+            session = AttendanceSession(
+                student_id=schedule.student_id,
+                therapist_id=schedule.therapist_id,
+                session_date=session_date,
+                start_time=schedule.start_time,
+                end_time=schedule.end_time or _time_add(schedule.start_time, schedule.duration_hours),
+                duration_hours=schedule.duration_hours,
+                session_type="regular",
+                source_type="generated",
+                linked_regular_schedule_id=schedule.id,
+                status="",
+            )
+            db.session.add(session)
+            created += 1
+    if created:
+        db.session.add(AuditLog(action="generate_month", entity_type="AttendanceSession", details=f"{year}-{month:02d}: {created}"))
+    db.session.commit()
+    return created
+
+
+def create_makeup_session(
+    student_id: int,
+    therapist_id: int,
+    session_date: date,
+    start_time: time,
+    duration_hours: float,
+    override_type: str = "makeup",
+    original_session_id: int | None = None,
+    notes: str = "",
+) -> AttendanceSession:
+    session = AttendanceSession(
+        student_id=student_id,
+        therapist_id=therapist_id,
+        session_date=session_date,
+        start_time=start_time,
+        end_time=_time_add(start_time, duration_hours),
+        duration_hours=duration_hours,
+        session_type="makeup",
+        source_type="manual",
+        status="",
+        notes=notes,
+    )
+    db.session.add(session)
+    db.session.flush()
+
+    override = SessionOverride(
+        original_session_id=original_session_id,
+        new_session_id=session.id,
+        override_type=override_type,
+        reason=notes,
+    )
+    db.session.add(override)
+    db.session.add(AuditLog(action="add_makeup", entity_type="AttendanceSession", entity_id=session.id, details=notes))
+    db.session.commit()
+    return session
+
+
+def update_session_status(session_id: int, status: str, notes: str = "") -> None:
+    session = AttendanceSession.query.get_or_404(session_id)
+    old = session.status
+    session.status = status
+    if notes:
+        session.notes = notes
+    db.session.add(AuditLog(action="status_change", entity_type="AttendanceSession", entity_id=session_id, details=f"{old}->{status}"))
+    db.session.commit()
+
+
+def get_month_sessions(year: int, month: int, therapist_id: int | None = None, student_id: int | None = None):
+    start = date(year, month, 1)
+    _, days = monthrange(year, month)
+    end = date(year, month, days)
+    query = AttendanceSession.query.filter(and_(AttendanceSession.session_date >= start, AttendanceSession.session_date <= end))
+    if therapist_id:
+        query = query.filter(AttendanceSession.therapist_id == therapist_id)
+    if student_id:
+        query = query.filter(AttendanceSession.student_id == student_id)
+    sessions = query.order_by(AttendanceSession.session_date, AttendanceSession.start_time).all()
+    grouped = defaultdict(list)
+    for s in sessions:
+        grouped[s.session_date].append(s)
+    return grouped
+
+
+
+
+def _effective_rendered_sessions(start_date: date, end_date: date):
+    replaced_ids = {
+        row[0]
+        for row in db.session.query(SessionOverride.original_session_id)
+        .filter(SessionOverride.original_session_id.isnot(None))
+        .all()
+    }
+
+    sessions = AttendanceSession.query.filter(
+        AttendanceSession.session_date >= start_date,
+        AttendanceSession.session_date <= end_date,
+        AttendanceSession.status.in_(list(RENDERED_STATUSES)),
+    ).all()
+
+    return [s for s in sessions if s.id not in replaced_ids]
+
+
+def weekly_student_hours(start_date: date, end_date: date) -> dict[int, float]:
+    rows = _effective_rendered_sessions(start_date, end_date)
+    result: dict[int, float] = defaultdict(float)
+    for r in rows:
+        result[r.student_id] += r.duration_hours
+    return dict(result)
+
+
+def weekly_therapist_hours(start_date: date, end_date: date) -> dict[int, float]:
+    rows = _effective_rendered_sessions(start_date, end_date)
+    result: dict[int, float] = defaultdict(float)
+    for r in rows:
+        result[r.therapist_id] += r.duration_hours
+    return dict(result)
+
+
+def missed_recovery_summary(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    student_id: int | None = None,
+    therapist_id: int | None = None,
+) -> dict[str, float]:
+    missed_query = AttendanceSession.query.filter(AttendanceSession.status.in_(list(MISSED_STATUSES)))
+    if start_date:
+        missed_query = missed_query.filter(AttendanceSession.session_date >= start_date)
+    if end_date:
+        missed_query = missed_query.filter(AttendanceSession.session_date <= end_date)
+    if student_id:
+        missed_query = missed_query.filter(AttendanceSession.student_id == student_id)
+    if therapist_id:
+        missed_query = missed_query.filter(AttendanceSession.therapist_id == therapist_id)
+
+    missed_sessions = missed_query.all()
+    missed_ids = [s.id for s in missed_sessions]
+    missed_hours = round(sum(s.duration_hours for s in missed_sessions), 2)
+
+    recovered_hours = 0.0
+    recovered_count = 0
+    if missed_ids:
+        replacement_ids = [
+            row[0]
+            for row in db.session.query(SessionOverride.new_session_id)
+            .filter(SessionOverride.original_session_id.in_(missed_ids))
+            .all()
+        ]
+        if replacement_ids:
+            recovered_query = AttendanceSession.query.filter(
+                AttendanceSession.id.in_(replacement_ids),
+                AttendanceSession.session_type == "makeup",
+                AttendanceSession.status.in_(list(RENDERED_STATUSES)),
+            )
+            if student_id:
+                recovered_query = recovered_query.filter(AttendanceSession.student_id == student_id)
+            if therapist_id:
+                recovered_query = recovered_query.filter(AttendanceSession.therapist_id == therapist_id)
+            recovered_sessions = recovered_query.all()
+            recovered_hours = round(sum(s.duration_hours for s in recovered_sessions), 2)
+            recovered_count = len(recovered_sessions)
+
+    return {
+        "missed_sessions": len(missed_sessions),
+        "missed_hours": missed_hours,
+        "recovered_makeup_sessions": recovered_count,
+        "recovered_makeup_hours": recovered_hours,
+        "remaining_missed_hours": round(max(missed_hours - recovered_hours, 0), 2),
+    }

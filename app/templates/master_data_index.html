@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Master Data Management</h2>
+<p>Manage core records directly inside the app.</p>
+<ul>
+  <li><a href="{{ url_for('web.master_students') }}">Students</a></li>
+  <li><a href="{{ url_for('web.master_therapists') }}">Therapists</a></li>
+  <li><a href="{{ url_for('web.master_admins') }}">Admin Staff</a></li>
+  <li><a href="{{ url_for('web.master_schedules') }}">Regular Schedules</a></li>
+</ul>
+{% endblock %}
