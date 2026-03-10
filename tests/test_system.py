@@ -5,7 +5,19 @@ from datetime import date, time
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from app.models import AdminStaff, AttendanceSession, BillingAdvice, Payment, RegularSchedule, SessionOverride, Student, Therapist, db
+from app.models import (
+    AdminStaff,
+    AssessmentDepositLedger,
+    AttendanceSession,
+    BillingAdvice,
+    Payment,
+    RegularSchedule,
+    RequiredDepositLedger,
+    SessionOverride,
+    Student,
+    Therapist,
+    db,
+)
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, missed_recovery_summary, weekly_student_hours, weekly_therapist_hours
 from app.services.billing_service import WEEKDAY_RATE, billing_hours_breakdown, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import import_students_and_schedules
@@ -785,3 +797,75 @@ def test_partial_deposit_payment_updates_remaining_balance(session):
     assert payment.overpayment_amount == 0
     assert payment.balance_after_payment == 700
     assert s.assessment_deposit_paid == 300
+
+
+def test_billing_advice_does_not_recharge_fully_paid_deposits(session):
+    s, t = setup_basic()
+    s.required_deposit_total = 1000
+    s.assessment_deposit_total = 500
+    s.required_deposit_paid = 1000
+    s.assessment_deposit_paid = 500
+    s.required_deposit_billed = 0
+    s.assessment_deposit_billed = 0
+    db.session.add(RequiredDepositLedger(student_id=s.id, entry_type="paid", amount=1000))
+    db.session.add(AssessmentDepositLedger(student_id=s.id, entry_type="paid", amount=500))
+
+    billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 8),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="regular",
+        source_type="generated",
+    )
+    db.session.add(billable)
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.required_deposit_charge == 0
+    assert advice.assessment_deposit_charge == 0
+    assert advice.subtotal_sessions == 550.0
+
+
+def test_billing_total_due_matches_components_without_self_old_balance(session):
+    s, t = setup_basic()
+    billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 8),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="regular",
+        source_type="generated",
+    )
+    db.session.add(billable)
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    expected = round(
+        advice.subtotal_sessions
+        + advice.old_balance
+        + advice.required_deposit_charge
+        + advice.assessment_deposit_charge
+        - advice.overpayment_credit,
+        2,
+    )
+    assert advice.total_due == expected
+
+    regenerated = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    expected_regen = round(
+        regenerated.subtotal_sessions
+        + regenerated.old_balance
+        + regenerated.required_deposit_charge
+        + regenerated.assessment_deposit_charge
+        - regenerated.overpayment_credit,
+        2,
+    )
+    assert regenerated.total_due == expected_regen

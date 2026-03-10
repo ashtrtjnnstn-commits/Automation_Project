@@ -126,15 +126,31 @@ def billing_hours_breakdown(student_id: int, start_date: date, end_date: date) -
     }
 
 
-def _unpaid_previous_balance(student_id: int) -> float:
-    open_advices = BillingAdvice.query.filter_by(student_id=student_id, status="Open").all()
+def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = None) -> float:
+    query = BillingAdvice.query.filter_by(student_id=student_id, status="Open")
+    if exclude_cycle_id is not None:
+        query = query.filter(BillingAdvice.billing_cycle_id != exclude_cycle_id)
+    open_advices = query.all()
     return round(sum(a.total_due for a in open_advices), 2)
 
 
 def _required_deposit_charge(student: Student) -> float:
     initialize_required_deposit(student)
-    remaining_by_billed = max(student.required_deposit_total - student.required_deposit_billed, 0)
-    remaining_by_paid = max(student.required_deposit_total - student.required_deposit_paid, 0)
+    billed_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(RequiredDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="billed")
+        .scalar()
+    )
+    paid_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(RequiredDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="paid")
+        .scalar()
+    )
+    billed_total = max(student.required_deposit_billed, billed_from_ledger or 0.0)
+    paid_total = max(student.required_deposit_paid, paid_from_ledger or 0.0)
+
+    remaining_by_billed = max(student.required_deposit_total - billed_total, 0)
+    remaining_by_paid = max(student.required_deposit_total - paid_total, 0)
     remaining = min(remaining_by_billed, remaining_by_paid)
     if remaining <= 0:
         return 0.0
@@ -146,8 +162,21 @@ def _required_deposit_charge(student: Student) -> float:
 
 
 def _assessment_deposit_charge(student: Student) -> float:
-    remaining_by_billed = max(student.assessment_deposit_total - student.assessment_deposit_billed, 0)
-    remaining_by_paid = max(student.assessment_deposit_total - student.assessment_deposit_paid, 0)
+    billed_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(AssessmentDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="billed")
+        .scalar()
+    )
+    paid_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(AssessmentDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="paid")
+        .scalar()
+    )
+    billed_total = max(student.assessment_deposit_billed, billed_from_ledger or 0.0)
+    paid_total = max(student.assessment_deposit_paid, paid_from_ledger or 0.0)
+
+    remaining_by_billed = max(student.assessment_deposit_total - billed_total, 0)
+    remaining_by_paid = max(student.assessment_deposit_total - paid_total, 0)
     remaining = min(remaining_by_billed, remaining_by_paid)
     if remaining <= 0:
         return 0.0
@@ -171,7 +200,7 @@ def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = N
         for student in students:
             totals = _session_totals(student.id, cycle.start_date, cycle.end_date)
             subtotal = round(totals.weekday_amount + totals.weekend_amount, 2)
-            old_balance = _unpaid_previous_balance(student.id)
+            old_balance = _unpaid_previous_balance(student.id, exclude_cycle_id=cycle.id)
             required_charge = _required_deposit_charge(student)
             assessment_charge = _assessment_deposit_charge(student)
             credit = student.overpayment_credit
