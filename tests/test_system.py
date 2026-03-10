@@ -758,6 +758,7 @@ def test_exact_required_deposit_payment_has_zero_overpayment(session):
     payment = record_payment(s.id, 1000, date(2026, 1, 10), purpose="Required Deposit")
     db.session.refresh(s)
     assert payment.overpayment_amount == 0
+    assert s.overpayment_credit == 0
     assert payment.balance_after_payment == 0
     assert s.required_deposit_paid == 1000
 
@@ -771,6 +772,7 @@ def test_exact_assessment_deposit_payment_has_zero_overpayment(session):
     payment = record_payment(s.id, 500, date(2026, 1, 10), purpose="Assessment Deposit")
     db.session.refresh(s)
     assert payment.overpayment_amount == 0
+    assert s.overpayment_credit == 0
     assert payment.balance_after_payment == 0
     assert s.assessment_deposit_paid == 500
 
@@ -782,7 +784,9 @@ def test_deposit_true_excess_only_excess_becomes_overpayment(session):
     db.session.commit()
 
     payment = record_payment(s.id, 1200, date(2026, 1, 10), purpose="Required Deposit")
+    db.session.refresh(s)
     assert payment.overpayment_amount == 200
+    assert s.overpayment_credit == 200
     assert payment.balance_after_payment == 0
 
 
@@ -869,3 +873,63 @@ def test_billing_total_due_matches_components_without_self_old_balance(session):
         2,
     )
     assert regenerated.total_due == expected_regen
+
+
+def test_legacy_deposit_misclassified_credit_does_not_zero_new_billing(session):
+    s, t = setup_basic()
+    s.required_deposit_total = 4400
+    s.required_deposit_paid = 4400
+    s.assessment_deposit_total = 500
+    s.assessment_deposit_paid = 500
+    s.overpayment_credit = 4400  # legacy buggy value
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=4400, purpose="Required Deposit", overpayment_amount=4400))
+
+    billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 8),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="regular",
+        source_type="generated",
+    )
+    db.session.add(billable)
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.required_deposit_charge == 0
+    assert advice.overpayment_credit == 0
+    assert advice.subtotal_sessions == 550.0
+    assert advice.total_due == 550.0
+
+
+def test_billing_page_shows_correct_generated_advice_context(session, client):
+    s, t = setup_basic()
+    s.required_deposit_total = 1000
+    s.required_deposit_paid = 1000
+    billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 8),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="regular",
+        source_type="generated",
+    )
+    db.session.add(billable)
+    db.session.commit()
+
+    res = client.post(
+        "/billing",
+        data={"student_id": str(s.id), "start_date": "2026-01-01", "end_date": "2026-01-15"},
+        follow_redirects=True,
+    )
+    assert res.status_code == 200
+    assert b"Session Subtotal" in res.data
+    assert b"Req: 0" in res.data
+    assert b"Total Due" in res.data

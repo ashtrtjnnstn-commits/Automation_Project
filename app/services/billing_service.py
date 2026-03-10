@@ -10,6 +10,7 @@ from app.models import (
     BillingAdvice,
     BillingCycle,
     BillingLineItem,
+    Payment,
     RequiredDepositLedger,
     SessionOverride,
     Student,
@@ -183,6 +184,25 @@ def _assessment_deposit_charge(student: Student) -> float:
     return min(2500.0, remaining)
 
 
+def _true_general_credit(student: Student) -> float:
+    """General carryforward credit excluding known legacy deposit-misclassified credits.
+
+    Legacy bug pattern: deposit-purpose payment rows where overpayment_amount == amount
+    (full payment marked as overpayment) should not zero-out future billing.
+    """
+    suspect_deposit_credit = (
+        db.session.query(db.func.coalesce(db.func.sum(Payment.overpayment_amount), 0.0))
+        .filter(
+            Payment.student_id == student.id,
+            Payment.purpose.in_(["Required Deposit", "Assessment Deposit"]),
+            Payment.overpayment_amount > 0,
+            Payment.overpayment_amount >= (Payment.amount - 0.009),
+        )
+        .scalar()
+    )
+    return round(max(student.overpayment_credit - (suspect_deposit_credit or 0.0), 0), 2)
+
+
 def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = None) -> list[BillingAdvice]:
     """Generate billing advice for one cycle.
 
@@ -203,7 +223,7 @@ def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = N
             old_balance = _unpaid_previous_balance(student.id, exclude_cycle_id=cycle.id)
             required_charge = _required_deposit_charge(student)
             assessment_charge = _assessment_deposit_charge(student)
-            credit = student.overpayment_credit
+            credit = _true_general_credit(student)
             total_due = round(max(subtotal + old_balance + required_charge + assessment_charge - credit, 0), 2)
 
             advice = BillingAdvice.query.filter_by(student_id=student.id, billing_cycle_id=cycle.id).first()
