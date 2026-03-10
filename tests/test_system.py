@@ -996,3 +996,21 @@ def test_billing_uses_real_carryforward_overpayment_only(session):
         ),
         0,
     )
+
+
+def test_required_deposit_payment_does_not_become_fake_overpayment_when_total_uninitialized(session):
+    s, _ = setup_basic()
+    # Simulate fresh student before any billing generation initialized required deposit total.
+    s.required_deposit_total = 0
+    s.required_deposit_paid = 0
+    s.overpayment_credit = 0
+    db.session.commit()
+
+    payment = record_payment(s.id, 2200, date(2026, 1, 10), purpose="Required Deposit")
+    db.session.refresh(s)
+
+    assert s.required_deposit_total == 2200
+    assert s.required_deposit_paid == 2200
+    assert payment.overpayment_amount == 0
+    assert s.overpayment_credit == 0
+    assert payment.balance_after_payment == 0

@@ -12,6 +12,7 @@ from app.models import (
     Student,
     db,
 )
+from app.services.billing_service import initialize_required_deposit
 
 
 def record_payment(
@@ -53,6 +54,11 @@ def record_payment(
 
         is_required_deposit_payment = purpose == "Required Deposit"
         is_assessment_deposit_payment = purpose == "Assessment Deposit"
+
+        # Required deposit total is lazily initialized in billing flows; initialize here too
+        # so direct deposit payments are applied to real obligation instead of overpayment.
+        if is_required_deposit_payment:
+            initialize_required_deposit(student)
 
         for advice in open_advices:
             if remaining <= 0:
