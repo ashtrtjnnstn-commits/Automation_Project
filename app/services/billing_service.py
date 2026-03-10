@@ -17,8 +17,8 @@ from app.models import (
     Student,
     db,
 )
-BILLABLE_STATUSES = {"Present", "Make-up", "Rescheduled"}
-RENDERED_BILLING_STATUSES = {"Present", "Make-up", "Rescheduled", "Non-billable"}
+BILLABLE_STATUSES = {"Present", "Make-up", "Rescheduled", "Billed"}
+RENDERED_BILLING_STATUSES = {"Present", "Make-up", "Rescheduled", "Billed", "Non-billable"}
 
 WEEKDAY_RATE = 550.0
 WEEKEND_RATE = 600.0
@@ -107,25 +107,46 @@ def billing_hours_breakdown(student_id: int, start_date: date, end_date: date) -
     sessions = _effective_sessions(student_id, start_date, end_date, RENDERED_BILLING_STATUSES)
     regular_hours = 0.0
     makeup_hours = 0.0
+    billed_hours = 0.0
     non_billable_hours = 0.0
 
     for s in sessions:
         if s.status == "Non-billable":
             non_billable_hours += s.duration_hours
+        elif s.status == "Billed":
+            billed_hours += s.duration_hours
         elif s.session_type == "makeup":
             makeup_hours += s.duration_hours
         else:
             regular_hours += s.duration_hours
 
-    billable_hours = regular_hours + makeup_hours
+    billable_hours = regular_hours + makeup_hours + billed_hours
     total_rendered_hours = billable_hours + non_billable_hours
     return {
         "regular_rendered_hours": round(regular_hours, 2),
         "makeup_rendered_hours": round(makeup_hours, 2),
+        "billed_hours": round(billed_hours, 2),
         "total_rendered_hours": round(total_rendered_hours, 2),
         "billable_hours": round(billable_hours, 2),
         "non_billable_hours": round(non_billable_hours, 2),
     }
+
+
+def billing_hours_breakdown_for_advice(advice: BillingAdvice) -> dict[str, float]:
+    hours = billing_hours_breakdown(advice.student_id, advice.billing_cycle.start_date, advice.billing_cycle.end_date)
+    override_map = {
+        "regular_rendered_hours": "regular_rendered_hours",
+        "makeup_rendered_hours": "makeup_rendered_hours",
+        "billed_hours": "billed_hours",
+        "total_rendered_hours": "total_rendered_hours",
+        "billable_hours": "billable_hours",
+        "non_billable_hours": "non_billable_hours",
+    }
+    for item in advice.line_items:
+        key = override_map.get(item.item_type)
+        if key:
+            hours[key] = round(item.quantity, 2)
+    return hours
 
 
 def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = None) -> float:

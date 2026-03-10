@@ -33,7 +33,7 @@ from app.services.attendance_service import (
     weekly_student_hours,
     weekly_therapist_hours,
 )
-from app.services.billing_service import billing_hours_breakdown, due_summary, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
+from app.services.billing_service import billing_hours_breakdown_for_advice, due_summary, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import (
     export_assessment_deposit_payment_history,
     export_admin_attendance,
@@ -52,7 +52,7 @@ from app.utils.date_utils import week_bounds
 
 web_bp = Blueprint("web", __name__)
 
-ATTENDANCE_STATUSES = ["Present", "Absent", "Cancelled", "Make-up", "Rescheduled", "No Show", "Non-billable"]
+ATTENDANCE_STATUSES = ["Present", "Absent", "Cancelled", "Make-up", "Rescheduled", "No Show", "Non-billable", "Billed"]
 
 
 @web_bp.route("/")
@@ -242,14 +242,8 @@ def billing_page():
     if selected_student_id:
         student_advices = BillingAdvice.query.filter_by(student_id=selected_student_id).order_by(BillingAdvice.id.desc()).limit(20).all()
 
-    advice_hours = {
-        a.id: billing_hours_breakdown(a.student_id, a.billing_cycle.start_date, a.billing_cycle.end_date)
-        for a in generated_advices
-    }
-    recent_advice_hours = {
-        a.id: billing_hours_breakdown(a.student_id, a.billing_cycle.start_date, a.billing_cycle.end_date)
-        for a in student_advices
-    }
+    advice_hours = {a.id: billing_hours_breakdown_for_advice(a) for a in generated_advices}
+    recent_advice_hours = {a.id: billing_hours_breakdown_for_advice(a) for a in student_advices}
 
     return render_template(
         "billing.html",
@@ -262,6 +256,78 @@ def billing_page():
         advice_hours=advice_hours,
         recent_advice_hours=recent_advice_hours,
     )
+
+
+@web_bp.route("/billing/<int:advice_id>/edit", methods=["GET", "POST"])
+def billing_edit(advice_id: int):
+    advice = BillingAdvice.query.get_or_404(advice_id)
+    cycle = advice.billing_cycle
+
+    if request.method == "POST":
+        cycle.start_date = datetime.strptime(request.form["cycle_start"], "%Y-%m-%d").date()
+        cycle.end_date = datetime.strptime(request.form["cycle_end"], "%Y-%m-%d").date()
+        cycle.issue_date = datetime.strptime(request.form["issue_date"], "%Y-%m-%d").date()
+        cycle.due_date = datetime.strptime(request.form["due_date"], "%Y-%m-%d").date()
+
+        advice.subtotal_sessions = float(request.form.get("session_subtotal", advice.subtotal_sessions) or 0)
+        advice.required_deposit_charge = float(request.form.get("required_deposit", advice.required_deposit_charge) or 0)
+        advice.assessment_deposit_charge = float(request.form.get("assessment_deposit", advice.assessment_deposit_charge) or 0)
+        advice.old_balance = float(request.form.get("old_balance", advice.old_balance) or 0)
+        advice.overpayment_credit = float(request.form.get("credit", advice.overpayment_credit) or 0)
+        advice.total_due = float(request.form.get("total_due", advice.total_due) or 0)
+        advice.status = request.form.get("status", advice.status)
+
+        remarks = request.form.get("remarks", "")
+        notes_item = BillingLineItem.query.filter_by(billing_advice_id=advice.id, item_type="billing_remarks").first()
+        if notes_item:
+            notes_item.description = remarks
+            notes_item.quantity = 0
+            notes_item.rate = 0
+            notes_item.amount = 0
+        elif remarks:
+            db.session.add(BillingLineItem(billing_advice_id=advice.id, item_type="billing_remarks", description=remarks, quantity=0, rate=0, amount=0))
+
+        overrides = {
+            "regular_rendered_hours": request.form.get("regular_rendered_hours", type=float),
+            "makeup_rendered_hours": request.form.get("makeup_rendered_hours", type=float),
+            "billed_hours": request.form.get("billed_hours", type=float),
+            "total_rendered_hours": request.form.get("total_rendered_hours", type=float),
+            "billable_hours": request.form.get("billable_hours", type=float),
+            "non_billable_hours": request.form.get("non_billable_hours", type=float),
+        }
+        for item_type, value in overrides.items():
+            existing = BillingLineItem.query.filter_by(billing_advice_id=advice.id, item_type=item_type).first()
+            if existing:
+                existing.quantity = float(value or 0)
+                existing.description = item_type.replace("_", " ").title()
+                existing.rate = 0
+                existing.amount = 0
+            elif value is not None:
+                db.session.add(BillingLineItem(billing_advice_id=advice.id, item_type=item_type, description=item_type.replace("_", " ").title(), quantity=float(value or 0), rate=0, amount=0))
+
+        db.session.commit()
+        flash("Billing advice updated.", "success")
+        return redirect(url_for("web.billing_page", student_id=advice.student_id))
+
+    hours = billing_hours_breakdown_for_advice(advice)
+    remarks_item = BillingLineItem.query.filter_by(billing_advice_id=advice.id, item_type="billing_remarks").first()
+    return render_template("billing_edit.html", advice=advice, cycle=cycle, hours=hours, remarks=(remarks_item.description if remarks_item else ""))
+
+
+@web_bp.post("/billing/<int:advice_id>/delete")
+def billing_delete(advice_id: int):
+    advice = BillingAdvice.query.get_or_404(advice_id)
+    if advice.payment_allocations:
+        flash("Cannot delete billing advice with linked payment allocations.", "error")
+        return redirect(url_for("web.billing_page", student_id=advice.student_id))
+
+    BillingLineItem.query.filter_by(billing_advice_id=advice.id).delete()
+    RequiredDepositLedger.query.filter_by(billing_advice_id=advice.id).delete()
+    AssessmentDepositLedger.query.filter_by(billing_advice_id=advice.id).delete()
+    db.session.delete(advice)
+    db.session.commit()
+    flash("Billing advice deleted.", "success")
+    return redirect(url_for("web.billing_page", student_id=advice.student_id))
 
 
 @web_bp.route("/payments", methods=["GET", "POST"])

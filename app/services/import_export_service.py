@@ -17,7 +17,7 @@ from app.models import (
     Therapist,
     db,
 )
-from app.services.billing_service import billing_hours_breakdown
+from app.services.billing_service import billing_hours_breakdown_for_advice
 from app.services.attendance_service import weekly_therapist_hours
 
 DAY_MAP = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
@@ -198,6 +198,7 @@ def export_billing_advices(path: str) -> str:
         "Due",
         "Regular Rendered Hours",
         "Make-up Rendered Hours",
+        "Billed Hours",
         "Total Rendered Hours",
         "Billable Hours",
         "Non-billable Hours",
@@ -210,7 +211,7 @@ def export_billing_advices(path: str) -> str:
     ])
     for advice in BillingAdvice.query.order_by(BillingAdvice.id).all():
         cycle = advice.billing_cycle
-        hours = billing_hours_breakdown(advice.student_id, cycle.start_date, cycle.end_date)
+        hours = billing_hours_breakdown_for_advice(advice)
         ws.append([
             advice.student.name,
             cycle.start_date.isoformat(),
@@ -219,6 +220,7 @@ def export_billing_advices(path: str) -> str:
             cycle.due_date.isoformat(),
             hours["regular_rendered_hours"],
             hours["makeup_rendered_hours"],
+            hours["billed_hours"],
             hours["total_rendered_hours"],
             hours["billable_hours"],
             hours["non_billable_hours"],

@@ -4,6 +4,11 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 
 ## Patch Notes
 
+### Version 9.6
+- Billing advice can now be edited from the dashboard.
+- Billing advice can now be deleted from the dashboard.
+- Added attendance status "Billed", which is counted in billing advice and billing breakdowns.
+
 ### Version 9.5 (Stabilization)
 - Weekly missed vs make-up recovery now has a per-student view to prevent pooled/misleading recovery totals.
 - Billing now consistently includes effective rendered billable session charges for the selected billing period.
@@ -20,7 +25,7 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 ### Version 9.2
 - Billing advice now respects **paid required deposit** amounts when computing new required deposit charges.
 - Billing advice now respects **paid assessment deposit** amounts when computing new assessment deposit charges.
-- Billing advice session subtotal now consistently computes billable rendered sessions (Present/Make-up/Rescheduled only) using weekday/weekend rates.
+- Billing advice session subtotal now consistently computes billable rendered sessions (Present/Make-up/Rescheduled/Billed) using weekday/weekend rates.
 - Payment tracker now supports editing existing payment ledger entries.
 
 ## Tech Stack
@@ -87,7 +92,7 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 ### Attendance
 - Monthly session generation from normalized `RegularSchedule` records.
 - Calendar-style monthly list grouped by date.
-- Session statuses: Present, Absent, Cancelled, Make-up, Rescheduled, No Show, Non-billable.
+- Session statuses: Present, Absent, Cancelled, Make-up, Rescheduled, No Show, Non-billable, Billed.
 - Make-up/override flow with audit trail and linked override records.
 - Weekly rendered hour summaries for students and therapists.
 - Admin attendance tracking and summary support.
@@ -264,7 +269,7 @@ Coverage includes:
 
 ## Reasonable assumptions documented
 - Attendance base unit is 30 minutes but durations are stored as decimal hours; UI uses 0.5 step inputs.
-- Rendered sessions are statuses: Present, Make-up, Rescheduled.
+- Rendered sessions are statuses: Present, Make-up, Rescheduled, Billed.
 - If no regular schedule exists, required deposit fallback uses weekday rate.
 - This build is intentionally explicit and maintainable over abstract architecture.
 

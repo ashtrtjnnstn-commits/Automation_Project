@@ -8,7 +8,7 @@ from sqlalchemy import and_
 
 from app.models import AttendanceSession, AuditLog, RegularSchedule, SessionOverride, db
 
-RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled", "Non-billable"}
+RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled", "Billed", "Non-billable"}
 MISSED_STATUSES = {"Absent", "Rescheduled", "Cancelled"}
 
 

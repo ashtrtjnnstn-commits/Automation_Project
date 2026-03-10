@@ -10,6 +10,7 @@ from app.models import (
     AssessmentDepositLedger,
     AttendanceSession,
     BillingAdvice,
+    PaymentAllocation,
     Payment,
     RegularSchedule,
     RequiredDepositLedger,
@@ -1014,3 +1015,205 @@ def test_required_deposit_payment_does_not_become_fake_overpayment_when_total_un
     assert payment.overpayment_amount == 0
     assert s.overpayment_credit == 0
     assert payment.balance_after_payment == 0
+
+
+def test_billing_advice_edit_page_loads(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    res = client.get(f"/billing/{advice.id}/edit")
+    assert res.status_code == 200
+    assert b"Edit Billing Advice" in res.data
+
+
+def test_editing_billing_advice_updates_record(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    res = client.post(
+        f"/billing/{advice.id}/edit",
+        data={
+            "cycle_start": "2026-01-02",
+            "cycle_end": "2026-01-16",
+            "issue_date": "2026-01-16",
+            "due_date": "2026-01-21",
+            "regular_rendered_hours": "1.50",
+            "makeup_rendered_hours": "0.50",
+            "billed_hours": "0.50",
+            "total_rendered_hours": "2.50",
+            "billable_hours": "2.00",
+            "non_billable_hours": "0.50",
+            "session_subtotal": "999.00",
+            "required_deposit": "100.00",
+            "assessment_deposit": "200.00",
+            "old_balance": "300.00",
+            "credit": "50.00",
+            "total_due": "1549.00",
+            "status": "Partial",
+            "remarks": "manual correction",
+        },
+        follow_redirects=True,
+    )
+    assert res.status_code == 200
+
+    db.session.refresh(advice)
+    assert advice.billing_cycle.start_date == date(2026, 1, 2)
+    assert advice.billing_cycle.end_date == date(2026, 1, 16)
+    assert advice.subtotal_sessions == 999.0
+    assert advice.total_due == 1549.0
+    assert advice.status == "Partial"
+
+
+def test_deleting_billing_advice_works_when_safe(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    res = client.post(f"/billing/{advice.id}/delete", follow_redirects=True)
+    assert res.status_code == 200
+    assert BillingAdvice.query.get(advice.id) is None
+
+
+def test_deleting_billing_advice_blocked_when_linked_payment_allocations(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    payment = Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100)
+    db.session.add(payment)
+    db.session.flush()
+    db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="current_bill", amount=100))
+    db.session.commit()
+
+    res = client.post(f"/billing/{advice.id}/delete", follow_redirects=True)
+    assert res.status_code == 200
+    assert b"Cannot delete billing advice with linked payment allocations" in res.data
+    assert BillingAdvice.query.get(advice.id) is not None
+
+
+def test_billing_page_shows_edit_and_delete_actions(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    generate_billing_advices_for_cycle(cycle.id, student_id=s.id)
+
+    res = client.get(f"/billing?student_id={s.id}")
+    assert res.status_code == 200
+    assert b"Edit" in res.data
+    assert b"Delete" in res.data
+
+
+def test_attendance_status_billed_is_accepted_and_saved(session, client):
+    setup_basic()
+    generate_monthly_sessions(2026, 1)
+    target = AttendanceSession.query.first()
+
+    res = client.post(
+        "/attendance/daily",
+        data={
+            "selected_date": target.session_date.isoformat(),
+            "session_ids": [str(target.id)],
+            f"status_{target.id}": "Billed",
+        },
+        follow_redirects=True,
+    )
+    assert res.status_code == 200
+    db.session.refresh(target)
+    assert target.status == "Billed"
+
+
+def test_billed_counts_as_billable_and_subtotal(session):
+    s, t = setup_basic()
+    db.session.add(
+        AttendanceSession(
+            student_id=s.id,
+            therapist_id=t.id,
+            session_date=date(2026, 1, 3),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            duration_hours=1,
+            session_type="regular",
+            source_type="generated",
+            status="Billed",
+        )
+    )
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    hours = billing_hours_breakdown(s.id, cycle.start_date, cycle.end_date)
+
+    assert hours["billed_hours"] == 1
+    assert hours["billable_hours"] == 1
+    assert advice.subtotal_sessions == 600
+
+
+def test_billing_breakdown_and_export_include_billed_hours(session, tmp_path):
+    s, t = setup_basic()
+    db.session.add(
+        AttendanceSession(
+            student_id=s.id,
+            therapist_id=t.id,
+            session_date=date(2026, 1, 2),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            duration_hours=1,
+            session_type="regular",
+            source_type="generated",
+            status="Billed",
+        )
+    )
+    db.session.commit()
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    generate_billing_advices_for_cycle(cycle.id, student_id=s.id)
+
+    output = export_billing_advices(str(tmp_path / "billing_billed.xlsx"))
+    wb = load_workbook(output)
+    ws = wb.active
+    header = [c.value for c in ws[1]]
+    assert "Billed Hours" in header
+
+
+def test_non_billable_logic_still_works_with_billed_status(session):
+    s, t = setup_basic()
+    db.session.add(
+        AttendanceSession(
+            student_id=s.id,
+            therapist_id=t.id,
+            session_date=date(2026, 1, 2),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            duration_hours=1,
+            session_type="regular",
+            source_type="generated",
+            status="Non-billable",
+        )
+    )
+    db.session.add(
+        AttendanceSession(
+            student_id=s.id,
+            therapist_id=t.id,
+            session_date=date(2026, 1, 3),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            duration_hours=1,
+            session_type="regular",
+            source_type="generated",
+            status="Billed",
+        )
+    )
+    db.session.commit()
+
+    hours = billing_hours_breakdown(s.id, date(2026, 1, 1), date(2026, 1, 15))
+    assert hours["non_billable_hours"] == 1
+    assert hours["billable_hours"] == 1
