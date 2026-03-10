@@ -34,20 +34,17 @@
 {% if generated_advices %}
 <h3>Generated Advice (Current Action)</h3>
 <table>
-  <tr><th>Student</th><th>Billing Period</th><th>Rendered Hours (WD/WE)</th><th>Rates</th><th>Deposits</th><th>Old Balance/Credit</th><th>Total Due</th></tr>
+  <tr><th>Student</th><th>Billing Period</th><th>Regular Rendered Hours</th><th>Make-up Rendered Hours</th><th>Total Rendered Hours</th><th>Billable Hours</th><th>Non-billable Hours</th><th>Session Subtotal</th><th>Deposits</th><th>Old Balance/Credit</th><th>Total Due</th></tr>
   {% for a in generated_advices %}
   <tr>
     <td>{{ a.student.name }}</td>
     <td>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }}</td>
-    <td>
-      {% set wd = 0 %}{% set we = 0 %}
-      {% for li in a.line_items %}
-        {% if li.item_type == 'weekday' %}{% set wd = li.quantity %}{% endif %}
-        {% if li.item_type == 'weekend' %}{% set we = li.quantity %}{% endif %}
-      {% endfor %}
-      {{ wd }} / {{ we }}
-    </td>
-    <td>550 / 600</td>
+    <td>{{ advice_hours[a.id].regular_rendered_hours }}</td>
+    <td>{{ advice_hours[a.id].makeup_rendered_hours }}</td>
+    <td>{{ advice_hours[a.id].total_rendered_hours }}</td>
+    <td>{{ advice_hours[a.id].billable_hours }}</td>
+    <td>{{ advice_hours[a.id].non_billable_hours }}</td>
+    <td>{{ a.subtotal_sessions }}</td>
     <td>Req: {{ a.required_deposit_charge }} | Assess: {{ a.assessment_deposit_charge }}</td>
     <td>Old: {{ a.old_balance }} / Credit: {{ a.overpayment_credit }}</td>
     <td>{{ a.total_due }}</td>
@@ -60,7 +57,7 @@
 <h3>Recent Advice for Selected Student</h3>
 <ul>
   {% for a in student_advices %}
-  <li>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Subtotal {{ a.subtotal_sessions }} | Old Bal {{ a.old_balance }} | Due {{ a.total_due }}</li>
+  <li>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Regular {{ recent_advice_hours[a.id].regular_rendered_hours }} | Make-up {{ recent_advice_hours[a.id].makeup_rendered_hours }} | Total Rendered {{ recent_advice_hours[a.id].total_rendered_hours }} | Billable {{ recent_advice_hours[a.id].billable_hours }} | Non-billable {{ recent_advice_hours[a.id].non_billable_hours }} | Subtotal {{ a.subtotal_sessions }} | Old Bal {{ a.old_balance }} | Due {{ a.total_due }}</li>
   {% endfor %}
 </ul>
 {% endif %}

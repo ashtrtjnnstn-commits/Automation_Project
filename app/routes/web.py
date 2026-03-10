@@ -33,7 +33,7 @@ from app.services.attendance_service import (
     weekly_student_hours,
     weekly_therapist_hours,
 )
-from app.services.billing_service import due_summary, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
+from app.services.billing_service import billing_hours_breakdown, due_summary, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import (
     export_assessment_deposit_payment_history,
     export_admin_attendance,
@@ -159,20 +159,31 @@ def weekly_reports():
         return redirect(url_for("web.weekly_reports", date=base.isoformat()))
 
     archives = WeeklyReportArchive.query.order_by(WeeklyReportArchive.week_start.desc()).limit(20).all()
-    missed_summary = missed_recovery_summary(start_date=start, end_date=end)
+    students = Student.query.all()
+    student_hours = weekly_student_hours(start, end)
+    student_missed_recovery = {
+        s.id: missed_recovery_summary(start_date=start, end_date=end, student_id=s.id)
+        for s in students
+    }
+    missed_summary = {
+        "missed_hours": round(sum(v["missed_hours"] for v in student_missed_recovery.values()), 2),
+        "recovered_makeup_hours": round(sum(v["recovered_makeup_hours"] for v in student_missed_recovery.values()), 2),
+        "remaining_missed_hours": round(sum(v["remaining_missed_hours"] for v in student_missed_recovery.values()), 2),
+    }
     return render_template(
         "weekly_reports.html",
         start=start,
         end=end,
         selected_date=base,
-        student_hours=weekly_student_hours(start, end),
+        student_hours=student_hours,
         therapist_hours=weekly_therapist_hours(start, end),
         admin_hours=admin_hours_summary(start, end),
-        students={s.id: s for s in Student.query.all()},
+        students={s.id: s for s in students},
         therapists={t.id: t for t in Therapist.query.all()},
         admins={a.id: a for a in AdminStaff.query.all()},
         archives=archives,
         missed_summary=missed_summary,
+        student_missed_recovery=student_missed_recovery,
     )
 
 
@@ -231,6 +242,15 @@ def billing_page():
     if selected_student_id:
         student_advices = BillingAdvice.query.filter_by(student_id=selected_student_id).order_by(BillingAdvice.id.desc()).limit(20).all()
 
+    advice_hours = {
+        a.id: billing_hours_breakdown(a.student_id, a.billing_cycle.start_date, a.billing_cycle.end_date)
+        for a in generated_advices
+    }
+    recent_advice_hours = {
+        a.id: billing_hours_breakdown(a.student_id, a.billing_cycle.start_date, a.billing_cycle.end_date)
+        for a in student_advices
+    }
+
     return render_template(
         "billing.html",
         cycles=cycles,
@@ -239,6 +259,8 @@ def billing_page():
         selected_student=selected_student,
         generated_advices=generated_advices,
         student_advices=student_advices,
+        advice_hours=advice_hours,
+        recent_advice_hours=recent_advice_hours,
     )
 
 

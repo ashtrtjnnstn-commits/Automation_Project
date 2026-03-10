@@ -4,6 +4,12 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 
 ## Patch Notes
 
+### Version 9.5 (Stabilization)
+- Weekly missed vs make-up recovery now has a per-student view to prevent pooled/misleading recovery totals.
+- Billing now consistently includes effective rendered billable session charges for the selected billing period.
+- Billing advice output now clearly shows rendered-hour basis (regular, make-up, total rendered, billable, non-billable).
+- Deposit payments are now applied to deposit obligations correctly and no longer misclassified as full overpayments.
+
 ### Version 9.3
 - Added Excel export for Required Deposit payment history (all students and per student).
 - Added Excel export for Assessment Deposit payment history (all students and per student).

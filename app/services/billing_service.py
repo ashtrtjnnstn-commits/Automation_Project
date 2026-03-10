@@ -16,6 +16,7 @@ from app.models import (
     db,
 )
 BILLABLE_STATUSES = {"Present", "Make-up", "Rescheduled"}
+RENDERED_BILLING_STATUSES = {"Present", "Make-up", "Rescheduled", "Non-billable"}
 
 WEEKDAY_RATE = 550.0
 WEEKEND_RATE = 600.0
@@ -70,6 +71,19 @@ def initialize_required_deposit(student: Student) -> None:
 
 
 def _session_totals(student_id: int, start_date: date, end_date: date) -> SessionTotals:
+    sessions = _effective_sessions(student_id, start_date, end_date, BILLABLE_STATUSES)
+    totals = SessionTotals()
+    for s in sessions:
+        if s.session_date.weekday() < 5:
+            totals.weekday_hours += s.duration_hours
+            totals.weekday_amount += s.duration_hours * WEEKDAY_RATE
+        else:
+            totals.weekend_hours += s.duration_hours
+            totals.weekend_amount += s.duration_hours * WEEKEND_RATE
+    return totals
+
+
+def _effective_sessions(student_id: int, start_date: date, end_date: date, statuses: set[str]) -> list[AttendanceSession]:
     replaced_ids = {
         row[0]
         for row in db.session.query(SessionOverride.original_session_id)
@@ -81,20 +95,35 @@ def _session_totals(student_id: int, start_date: date, end_date: date) -> Sessio
         AttendanceSession.student_id == student_id,
         AttendanceSession.session_date >= start_date,
         AttendanceSession.session_date <= end_date,
-        AttendanceSession.status.in_(list(BILLABLE_STATUSES)),
+        AttendanceSession.status.in_(list(statuses)),
     ).all()
 
-    totals = SessionTotals()
+    return [s for s in sessions if s.id not in replaced_ids]
+
+
+def billing_hours_breakdown(student_id: int, start_date: date, end_date: date) -> dict[str, float]:
+    sessions = _effective_sessions(student_id, start_date, end_date, RENDERED_BILLING_STATUSES)
+    regular_hours = 0.0
+    makeup_hours = 0.0
+    non_billable_hours = 0.0
+
     for s in sessions:
-        if s.id in replaced_ids:
-            continue
-        if s.session_date.weekday() < 5:
-            totals.weekday_hours += s.duration_hours
-            totals.weekday_amount += s.duration_hours * WEEKDAY_RATE
+        if s.status == "Non-billable":
+            non_billable_hours += s.duration_hours
+        elif s.session_type == "makeup":
+            makeup_hours += s.duration_hours
         else:
-            totals.weekend_hours += s.duration_hours
-            totals.weekend_amount += s.duration_hours * WEEKEND_RATE
-    return totals
+            regular_hours += s.duration_hours
+
+    billable_hours = regular_hours + makeup_hours
+    total_rendered_hours = billable_hours + non_billable_hours
+    return {
+        "regular_rendered_hours": round(regular_hours, 2),
+        "makeup_rendered_hours": round(makeup_hours, 2),
+        "total_rendered_hours": round(total_rendered_hours, 2),
+        "billable_hours": round(billable_hours, 2),
+        "non_billable_hours": round(non_billable_hours, 2),
+    }
 
 
 def _unpaid_previous_balance(student_id: int) -> float:

@@ -51,54 +51,83 @@ def record_payment(
 
         open_advices = BillingAdvice.query.filter_by(student_id=student_id, status="Open").order_by(BillingAdvice.created_at).all()
 
+        is_required_deposit_payment = purpose == "Required Deposit"
+        is_assessment_deposit_payment = purpose == "Assessment Deposit"
+
         for advice in open_advices:
             if remaining <= 0:
                 break
-            old_applied = min(remaining, advice.old_balance)
-            if old_applied > 0:
-                advice.old_balance -= old_applied
-                advice.total_due -= old_applied
-                remaining -= old_applied
-                db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="old_balance", amount=old_applied))
+            if not is_required_deposit_payment and not is_assessment_deposit_payment:
+                old_applied = min(remaining, advice.old_balance)
+                if old_applied > 0:
+                    advice.old_balance -= old_applied
+                    advice.total_due -= old_applied
+                    remaining -= old_applied
+                    db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="old_balance", amount=old_applied))
 
-            current_due = max(advice.total_due - advice.required_deposit_charge - advice.assessment_deposit_charge, 0)
-            cur_applied = min(remaining, current_due)
-            if cur_applied > 0:
-                advice.total_due -= cur_applied
-                remaining -= cur_applied
-                db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="current_bill", amount=cur_applied))
+                current_due = max(advice.total_due - advice.required_deposit_charge - advice.assessment_deposit_charge, 0)
+                cur_applied = min(remaining, current_due)
+                if cur_applied > 0:
+                    advice.total_due -= cur_applied
+                    remaining -= cur_applied
+                    db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="current_bill", amount=cur_applied))
 
-            req_unpaid = advice.required_deposit_charge
-            req_applied = min(remaining, req_unpaid)
-            if req_applied > 0:
-                advice.required_deposit_charge -= req_applied
-                advice.total_due -= req_applied
-                student.required_deposit_paid += req_applied
-                remaining -= req_applied
-                db.session.add(RequiredDepositLedger(student_id=student_id, billing_cycle_id=advice.billing_cycle_id, billing_advice_id=advice.id, entry_type="paid", amount=req_applied))
-                db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="required_deposit", amount=req_applied))
+            if is_required_deposit_payment or (not is_assessment_deposit_payment):
+                req_unpaid = advice.required_deposit_charge
+                req_applied = min(remaining, req_unpaid)
+                if req_applied > 0:
+                    advice.required_deposit_charge -= req_applied
+                    advice.total_due -= req_applied
+                    student.required_deposit_paid += req_applied
+                    remaining -= req_applied
+                    db.session.add(RequiredDepositLedger(student_id=student_id, billing_cycle_id=advice.billing_cycle_id, billing_advice_id=advice.id, entry_type="paid", amount=req_applied))
+                    db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="required_deposit", amount=req_applied))
 
-            ass_unpaid = advice.assessment_deposit_charge
-            ass_applied = min(remaining, ass_unpaid)
-            if ass_applied > 0:
-                advice.assessment_deposit_charge -= ass_applied
-                advice.total_due -= ass_applied
-                student.assessment_deposit_paid += ass_applied
-                remaining -= ass_applied
-                db.session.add(AssessmentDepositLedger(student_id=student_id, billing_cycle_id=advice.billing_cycle_id, billing_advice_id=advice.id, entry_type="paid", amount=ass_applied))
-                db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="assessment_deposit", amount=ass_applied))
+            if is_assessment_deposit_payment or (not is_required_deposit_payment):
+                ass_unpaid = advice.assessment_deposit_charge
+                ass_applied = min(remaining, ass_unpaid)
+                if ass_applied > 0:
+                    advice.assessment_deposit_charge -= ass_applied
+                    advice.total_due -= ass_applied
+                    student.assessment_deposit_paid += ass_applied
+                    remaining -= ass_applied
+                    db.session.add(AssessmentDepositLedger(student_id=student_id, billing_cycle_id=advice.billing_cycle_id, billing_advice_id=advice.id, entry_type="paid", amount=ass_applied))
+                    db.session.add(PaymentAllocation(payment_id=payment.id, billing_advice_id=advice.id, allocation_type="assessment_deposit", amount=ass_applied))
 
             if advice.total_due <= 0.009:
                 advice.total_due = 0.0
                 advice.status = "Paid"
+
+        if is_required_deposit_payment and remaining > 0:
+            direct_req_unpaid = max(student.required_deposit_total - student.required_deposit_paid, 0)
+            direct_req_applied = min(remaining, direct_req_unpaid)
+            if direct_req_applied > 0:
+                student.required_deposit_paid += direct_req_applied
+                remaining -= direct_req_applied
+                db.session.add(RequiredDepositLedger(student_id=student_id, entry_type="paid", amount=direct_req_applied))
+                db.session.add(PaymentAllocation(payment_id=payment.id, allocation_type="required_deposit", amount=direct_req_applied))
+
+        if is_assessment_deposit_payment and remaining > 0:
+            direct_ass_unpaid = max(student.assessment_deposit_total - student.assessment_deposit_paid, 0)
+            direct_ass_applied = min(remaining, direct_ass_unpaid)
+            if direct_ass_applied > 0:
+                student.assessment_deposit_paid += direct_ass_applied
+                remaining -= direct_ass_applied
+                db.session.add(AssessmentDepositLedger(student_id=student_id, entry_type="paid", amount=direct_ass_applied))
+                db.session.add(PaymentAllocation(payment_id=payment.id, allocation_type="assessment_deposit", amount=direct_ass_applied))
 
         if remaining > 0:
             student.overpayment_credit = round(student.overpayment_credit + remaining, 2)
             payment.overpayment_amount = remaining
             db.session.add(PaymentAllocation(payment_id=payment.id, allocation_type="overpayment_credit", amount=remaining))
 
-        latest_open = BillingAdvice.query.filter_by(student_id=student_id, status="Open").all()
-        payment.balance_after_payment = round(sum(a.total_due for a in latest_open), 2)
+        if is_required_deposit_payment:
+            payment.balance_after_payment = round(max(student.required_deposit_total - student.required_deposit_paid, 0), 2)
+        elif is_assessment_deposit_payment:
+            payment.balance_after_payment = round(max(student.assessment_deposit_total - student.assessment_deposit_paid, 0), 2)
+        else:
+            latest_open = BillingAdvice.query.filter_by(student_id=student_id, status="Open").all()
+            payment.balance_after_payment = round(sum(a.total_due for a in latest_open), 2)
 
         if manual_overpayment is not None:
             payment.overpayment_amount = manual_overpayment

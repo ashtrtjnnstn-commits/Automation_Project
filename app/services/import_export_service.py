@@ -13,11 +13,11 @@ from app.models import (
     Payment,
     PaymentAllocation,
     RegularSchedule,
-    SessionOverride,
     Student,
     Therapist,
     db,
 )
+from app.services.billing_service import billing_hours_breakdown
 from app.services.attendance_service import weekly_therapist_hours
 
 DAY_MAP = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
@@ -208,49 +208,20 @@ def export_billing_advices(path: str) -> str:
         "Total Due",
         "Status",
     ])
-    replaced_ids = {
-        row[0]
-        for row in db.session.query(SessionOverride.original_session_id)
-        .filter(SessionOverride.original_session_id.isnot(None))
-        .all()
-    }
     for advice in BillingAdvice.query.order_by(BillingAdvice.id).all():
         cycle = advice.billing_cycle
-        sessions = AttendanceSession.query.filter(
-            AttendanceSession.student_id == advice.student_id,
-            AttendanceSession.session_date >= cycle.start_date,
-            AttendanceSession.session_date <= cycle.end_date,
-            AttendanceSession.status.in_(["Present", "Make-up", "Rescheduled", "Non-billable"]),
-        ).all()
-
-        regular_hours = 0.0
-        makeup_hours = 0.0
-        billable_hours = 0.0
-        non_billable_hours = 0.0
-        for sess in sessions:
-            if sess.id in replaced_ids:
-                continue
-            if sess.status in {"Present", "Make-up", "Rescheduled"}:
-                billable_hours += sess.duration_hours
-                if sess.session_type == "makeup":
-                    makeup_hours += sess.duration_hours
-                else:
-                    regular_hours += sess.duration_hours
-            elif sess.status == "Non-billable":
-                non_billable_hours += sess.duration_hours
-
-        total_rendered_hours = regular_hours + makeup_hours + non_billable_hours
+        hours = billing_hours_breakdown(advice.student_id, cycle.start_date, cycle.end_date)
         ws.append([
             advice.student.name,
             cycle.start_date.isoformat(),
             cycle.end_date.isoformat(),
             cycle.issue_date.isoformat(),
             cycle.due_date.isoformat(),
-            round(regular_hours, 2),
-            round(makeup_hours, 2),
-            round(total_rendered_hours, 2),
-            round(billable_hours, 2),
-            round(non_billable_hours, 2),
+            hours["regular_rendered_hours"],
+            hours["makeup_rendered_hours"],
+            hours["total_rendered_hours"],
+            hours["billable_hours"],
+            hours["non_billable_hours"],
             advice.subtotal_sessions,
             advice.old_balance,
             advice.required_deposit_charge,

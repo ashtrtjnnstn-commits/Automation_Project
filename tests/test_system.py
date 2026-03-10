@@ -7,7 +7,7 @@ from openpyxl import Workbook, load_workbook
 
 from app.models import AdminStaff, AttendanceSession, BillingAdvice, Payment, RegularSchedule, SessionOverride, Student, Therapist, db
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, missed_recovery_summary, weekly_student_hours, weekly_therapist_hours
-from app.services.billing_service import WEEKDAY_RATE, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
+from app.services.billing_service import WEEKDAY_RATE, billing_hours_breakdown, generate_billing_advices_for_cycle, generate_billing_cycles_for_range
 from app.services.import_export_service import import_students_and_schedules
 from app.services.import_export_service import (
     export_assessment_deposit_payment_history,
@@ -629,3 +629,159 @@ def test_student_b_makeup_does_not_reduce_student_a_remaining(session):
     s2_summary = missed_recovery_summary(student_id=s2.id)
     assert s1_summary["remaining_missed_hours"] == 1.0
     assert s2_summary["remaining_missed_hours"] == 0.0
+
+
+def test_rendered_billable_sessions_produce_non_zero_subtotal(session):
+    s, _ = setup_basic()
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    sess = AttendanceSession.query.filter(
+        AttendanceSession.student_id == s.id,
+        AttendanceSession.session_date >= cycle.start_date,
+        AttendanceSession.session_date <= cycle.end_date,
+    ).first()
+    if not sess:
+        generate_monthly_sessions(2026, 1)
+        sess = AttendanceSession.query.filter(
+            AttendanceSession.student_id == s.id,
+            AttendanceSession.session_date >= cycle.start_date,
+            AttendanceSession.session_date <= cycle.end_date,
+        ).first()
+    sess.status = "Present"
+    db.session.commit()
+
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.subtotal_sessions > 0
+
+
+def test_billing_hours_breakdown_matches_effective_sessions(session):
+    s, t = setup_basic()
+    original = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Rescheduled",
+        session_type="regular",
+        source_type="generated",
+    )
+    makeup = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 6),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="makeup",
+        source_type="manual",
+    )
+    non_billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 7),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=0.5,
+        status="Non-billable",
+        session_type="regular",
+        source_type="manual",
+    )
+    db.session.add_all([original, makeup, non_billable])
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=original.id, new_session_id=makeup.id, override_type="makeup"))
+    db.session.commit()
+
+    hours = billing_hours_breakdown(s.id, date(2026, 1, 1), date(2026, 1, 15))
+    assert hours["regular_rendered_hours"] == 0.0
+    assert hours["makeup_rendered_hours"] == 1.0
+    assert hours["billable_hours"] == 1.0
+    assert hours["non_billable_hours"] == 0.5
+    assert hours["total_rendered_hours"] == 1.5
+
+
+def test_non_billable_in_rendered_not_billed_totals(session):
+    s, t = setup_basic()
+    billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 8),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Present",
+        session_type="regular",
+        source_type="generated",
+    )
+    non_billable = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 9),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Non-billable",
+        session_type="regular",
+        source_type="manual",
+    )
+    db.session.add_all([billable, non_billable])
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    hours = billing_hours_breakdown(s.id, cycle.start_date, cycle.end_date)
+
+    assert hours["total_rendered_hours"] == 2.0
+    assert hours["billable_hours"] == 1.0
+    assert advice.subtotal_sessions == 550.0
+
+
+def test_exact_required_deposit_payment_has_zero_overpayment(session):
+    s, _ = setup_basic()
+    s.required_deposit_total = 1000
+    s.required_deposit_paid = 0
+    db.session.commit()
+
+    payment = record_payment(s.id, 1000, date(2026, 1, 10), purpose="Required Deposit")
+    db.session.refresh(s)
+    assert payment.overpayment_amount == 0
+    assert payment.balance_after_payment == 0
+    assert s.required_deposit_paid == 1000
+
+
+def test_exact_assessment_deposit_payment_has_zero_overpayment(session):
+    s, _ = setup_basic()
+    s.assessment_deposit_total = 500
+    s.assessment_deposit_paid = 0
+    db.session.commit()
+
+    payment = record_payment(s.id, 500, date(2026, 1, 10), purpose="Assessment Deposit")
+    db.session.refresh(s)
+    assert payment.overpayment_amount == 0
+    assert payment.balance_after_payment == 0
+    assert s.assessment_deposit_paid == 500
+
+
+def test_deposit_true_excess_only_excess_becomes_overpayment(session):
+    s, _ = setup_basic()
+    s.required_deposit_total = 1000
+    s.required_deposit_paid = 0
+    db.session.commit()
+
+    payment = record_payment(s.id, 1200, date(2026, 1, 10), purpose="Required Deposit")
+    assert payment.overpayment_amount == 200
+    assert payment.balance_after_payment == 0
+
+
+def test_partial_deposit_payment_updates_remaining_balance(session):
+    s, _ = setup_basic()
+    s.assessment_deposit_total = 1000
+    s.assessment_deposit_paid = 0
+    db.session.commit()
+
+    payment = record_payment(s.id, 300, date(2026, 1, 10), purpose="Assessment Deposit")
+    db.session.refresh(s)
+    assert payment.overpayment_amount == 0
+    assert payment.balance_after_payment == 700
+    assert s.assessment_deposit_paid == 300
