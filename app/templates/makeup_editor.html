@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Make-up / Override Editor</h2>
+<form method="post">
+  <label>Student <select name="student_id">{% for s in students %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}</select></label>
+  <label>Therapist <select name="therapist_id">{% for t in therapists %}<option value="{{t.id}}">{{t.name}}</option>{% endfor %}</select></label>
+  <label>Date <input type="date" name="session_date" required /></label>
+  <label>Start <input type="time" name="start_time" required /></label>
+  <label>Duration (hours) <input type="number" name="duration_hours" step="0.5" required /></label>
+  <label>Type <select name="override_type"><option value="makeup">Make-up</option><option value="rescheduled">Rescheduled</option><option value="replacement">Replacement</option></select></label>
+  <label>Original Session ID (optional) <input name="original_session_id" type="number" /></label>
+  <label>Notes <textarea name="notes"></textarea></label>
+  <button>Add Make-up Session</button>
+</form>
+{% endblock %}

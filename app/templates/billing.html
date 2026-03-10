@@ -1,0 +1,71 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Billing Generator</h2>
+
+<form method="get" class="inline-form">
+  <label>Select Student First
+    <select name="student_id" required>
+      <option value="">-- Select student --</option>
+      {% for s in students %}
+      <option value="{{ s.id }}" {% if selected_student_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button>Load Student Billing Context</button>
+</form>
+
+{% if selected_student %}
+<section>
+  <h3>Selected Student Context</h3>
+  <p><strong>{{ selected_student.name }}</strong></p>
+  <p>Contract Hours/Week: {{ selected_student.contract_hours_per_week }} | Overpayment Credit: {{ selected_student.overpayment_credit }}</p>
+</section>
+
+<form method="post" class="inline-form">
+  <input type="hidden" name="student_id" value="{{ selected_student.id }}" />
+  <label>Start Date <input type="date" name="start_date" required /></label>
+  <label>End Date <input type="date" name="end_date" required /></label>
+  <button>Generate Student Billing</button>
+</form>
+{% else %}
+<p><em>Please select a student to show billing period inputs.</em></p>
+{% endif %}
+
+{% if generated_advices %}
+<h3>Generated Advice (Current Action)</h3>
+<table>
+  <tr><th>Student</th><th>Billing Period</th><th>Regular Rendered Hours</th><th>Make-up Rendered Hours</th><th>Total Rendered Hours</th><th>Billable Hours</th><th>Non-billable Hours</th><th>Session Subtotal</th><th>Deposits</th><th>Old Balance/Credit</th><th>Total Due</th></tr>
+  {% for a in generated_advices %}
+  <tr>
+    <td>{{ a.student.name }}</td>
+    <td>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }}</td>
+    <td>{{ advice_hours[a.id].regular_rendered_hours }}</td>
+    <td>{{ advice_hours[a.id].makeup_rendered_hours }}</td>
+    <td>{{ advice_hours[a.id].total_rendered_hours }}</td>
+    <td>{{ advice_hours[a.id].billable_hours }}</td>
+    <td>{{ advice_hours[a.id].non_billable_hours }}</td>
+    <td>{{ a.subtotal_sessions }}</td>
+    <td>Req: {{ a.required_deposit_charge }} | Assess: {{ a.assessment_deposit_charge }}</td>
+    <td>Old: {{ a.old_balance }} / Credit: {{ a.overpayment_credit }}</td>
+    <td>{{ a.total_due }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if student_advices %}
+<h3>Recent Advice for Selected Student</h3>
+<ul>
+  {% for a in student_advices %}
+  <li>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Regular {{ recent_advice_hours[a.id].regular_rendered_hours }} | Make-up {{ recent_advice_hours[a.id].makeup_rendered_hours }} | Total Rendered {{ recent_advice_hours[a.id].total_rendered_hours }} | Billable {{ recent_advice_hours[a.id].billable_hours }} | Non-billable {{ recent_advice_hours[a.id].non_billable_hours }} | Subtotal {{ a.subtotal_sessions }} | Old Bal {{ a.old_balance }} | Due {{ a.total_due }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h3>Recent Cycles</h3>
+<ul>
+{% for c in cycles %}
+<li>{{ c.start_date }} to {{ c.end_date }} (Due {{ c.due_date }}) - {{ c.billing_advices|length }} advices</li>
+{% else %}<li>No cycles yet.</li>{% endfor %}
+</ul>
+{% endblock %}
