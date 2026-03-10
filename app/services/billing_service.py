@@ -11,6 +11,7 @@ from app.models import (
     BillingCycle,
     BillingLineItem,
     Payment,
+    PaymentAllocation,
     RequiredDepositLedger,
     SessionOverride,
     Student,
@@ -137,18 +138,8 @@ def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = Non
 
 def _required_deposit_charge(student: Student) -> float:
     initialize_required_deposit(student)
-    billed_from_ledger = (
-        db.session.query(db.func.coalesce(db.func.sum(RequiredDepositLedger.amount), 0.0))
-        .filter_by(student_id=student.id, entry_type="billed")
-        .scalar()
-    )
-    paid_from_ledger = (
-        db.session.query(db.func.coalesce(db.func.sum(RequiredDepositLedger.amount), 0.0))
-        .filter_by(student_id=student.id, entry_type="paid")
-        .scalar()
-    )
-    billed_total = max(student.required_deposit_billed, billed_from_ledger or 0.0)
-    paid_total = max(student.required_deposit_paid, paid_from_ledger or 0.0)
+    billed_total = _required_billed_total(student)
+    paid_total = _required_paid_total(student)
 
     remaining_by_billed = max(student.required_deposit_total - billed_total, 0)
     remaining_by_paid = max(student.required_deposit_total - paid_total, 0)
@@ -163,18 +154,8 @@ def _required_deposit_charge(student: Student) -> float:
 
 
 def _assessment_deposit_charge(student: Student) -> float:
-    billed_from_ledger = (
-        db.session.query(db.func.coalesce(db.func.sum(AssessmentDepositLedger.amount), 0.0))
-        .filter_by(student_id=student.id, entry_type="billed")
-        .scalar()
-    )
-    paid_from_ledger = (
-        db.session.query(db.func.coalesce(db.func.sum(AssessmentDepositLedger.amount), 0.0))
-        .filter_by(student_id=student.id, entry_type="paid")
-        .scalar()
-    )
-    billed_total = max(student.assessment_deposit_billed, billed_from_ledger or 0.0)
-    paid_total = max(student.assessment_deposit_paid, paid_from_ledger or 0.0)
+    billed_total = _assessment_billed_total(student)
+    paid_total = _assessment_paid_total(student)
 
     remaining_by_billed = max(student.assessment_deposit_total - billed_total, 0)
     remaining_by_paid = max(student.assessment_deposit_total - paid_total, 0)
@@ -185,22 +166,81 @@ def _assessment_deposit_charge(student: Student) -> float:
 
 
 def _true_general_credit(student: Student) -> float:
-    """General carryforward credit excluding known legacy deposit-misclassified credits.
+    tracked_required_paid = _required_tracked_paid_total(student)
+    tracked_assessment_paid = _assessment_tracked_paid_total(student)
+    converted_required = max(_required_paid_total(student) - tracked_required_paid, 0)
+    converted_assessment = max(_assessment_paid_total(student) - tracked_assessment_paid, 0)
+    return round(max(student.overpayment_credit - converted_required - converted_assessment, 0), 2)
 
-    Legacy bug pattern: deposit-purpose payment rows where overpayment_amount == amount
-    (full payment marked as overpayment) should not zero-out future billing.
-    """
-    suspect_deposit_credit = (
-        db.session.query(db.func.coalesce(db.func.sum(Payment.overpayment_amount), 0.0))
-        .filter(
-            Payment.student_id == student.id,
-            Payment.purpose.in_(["Required Deposit", "Assessment Deposit"]),
-            Payment.overpayment_amount > 0,
-            Payment.overpayment_amount >= (Payment.amount - 0.009),
-        )
+
+def _required_billed_total(student: Student) -> float:
+    billed_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(RequiredDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="billed")
         .scalar()
     )
-    return round(max(student.overpayment_credit - (suspect_deposit_credit or 0.0), 0), 2)
+    return max(student.required_deposit_billed, billed_from_ledger or 0.0)
+
+
+def _assessment_billed_total(student: Student) -> float:
+    billed_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(AssessmentDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="billed")
+        .scalar()
+    )
+    return max(student.assessment_deposit_billed, billed_from_ledger or 0.0)
+
+
+def _required_tracked_paid_total(student: Student) -> float:
+    paid_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(RequiredDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="paid")
+        .scalar()
+    )
+    paid_from_alloc = (
+        db.session.query(db.func.coalesce(db.func.sum(PaymentAllocation.amount), 0.0))
+        .join(Payment, Payment.id == PaymentAllocation.payment_id)
+        .filter(Payment.student_id == student.id, PaymentAllocation.allocation_type == "required_deposit")
+        .scalar()
+    )
+    return max(student.required_deposit_paid, paid_from_ledger or 0.0, paid_from_alloc or 0.0)
+
+
+def _assessment_tracked_paid_total(student: Student) -> float:
+    paid_from_ledger = (
+        db.session.query(db.func.coalesce(db.func.sum(AssessmentDepositLedger.amount), 0.0))
+        .filter_by(student_id=student.id, entry_type="paid")
+        .scalar()
+    )
+    paid_from_alloc = (
+        db.session.query(db.func.coalesce(db.func.sum(PaymentAllocation.amount), 0.0))
+        .join(Payment, Payment.id == PaymentAllocation.payment_id)
+        .filter(Payment.student_id == student.id, PaymentAllocation.allocation_type == "assessment_deposit")
+        .scalar()
+    )
+    return max(student.assessment_deposit_paid, paid_from_ledger or 0.0, paid_from_alloc or 0.0)
+
+
+def _required_paid_total(student: Student) -> float:
+    tracked = _required_tracked_paid_total(student)
+    paid_from_purpose = (
+        db.session.query(db.func.coalesce(db.func.sum(Payment.amount), 0.0))
+        .filter(Payment.student_id == student.id, Payment.purpose == "Required Deposit")
+        .scalar()
+    )
+    inferred = min(student.required_deposit_total, paid_from_purpose or 0.0)
+    return max(tracked, inferred)
+
+
+def _assessment_paid_total(student: Student) -> float:
+    tracked = _assessment_tracked_paid_total(student)
+    paid_from_purpose = (
+        db.session.query(db.func.coalesce(db.func.sum(Payment.amount), 0.0))
+        .filter(Payment.student_id == student.id, Payment.purpose == "Assessment Deposit")
+        .scalar()
+    )
+    inferred = min(student.assessment_deposit_total, paid_from_purpose or 0.0)
+    return max(tracked, inferred)
 
 
 def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = None) -> list[BillingAdvice]:

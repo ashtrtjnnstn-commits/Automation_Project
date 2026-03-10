@@ -878,11 +878,12 @@ def test_billing_total_due_matches_components_without_self_old_balance(session):
 def test_legacy_deposit_misclassified_credit_does_not_zero_new_billing(session):
     s, t = setup_basic()
     s.required_deposit_total = 4400
-    s.required_deposit_paid = 4400
+    s.required_deposit_paid = 0
     s.assessment_deposit_total = 500
-    s.assessment_deposit_paid = 500
+    s.assessment_deposit_paid = 0
     s.overpayment_credit = 4400  # legacy buggy value
     db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=4400, purpose="Required Deposit", overpayment_amount=4400))
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, purpose="Assessment Deposit", overpayment_amount=500))
 
     billable = AttendanceSession(
         student_id=s.id,
@@ -901,6 +902,7 @@ def test_legacy_deposit_misclassified_credit_does_not_zero_new_billing(session):
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
     advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
     assert advice.required_deposit_charge == 0
+    assert advice.assessment_deposit_charge == 0
     assert advice.overpayment_credit == 0
     assert advice.subtotal_sessions == 550.0
     assert advice.total_due == 550.0
@@ -933,3 +935,64 @@ def test_billing_page_shows_correct_generated_advice_context(session, client):
     assert b"Session Subtotal" in res.data
     assert b"Req: 0" in res.data
     assert b"Total Due" in res.data
+
+
+def test_billing_total_due_includes_old_unpaid_balance(session):
+    s, t = setup_basic()
+    c1 = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    c2 = generate_billing_cycles_for_range(date(2026, 1, 16), date(2026, 1, 31))[0]
+
+    prior_advice = BillingAdvice(student_id=s.id, billing_cycle_id=c1.id, total_due=1000, status="Open")
+    db.session.add(prior_advice)
+    db.session.add(
+        AttendanceSession(
+            student_id=s.id,
+            therapist_id=t.id,
+            session_date=date(2026, 1, 20),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            duration_hours=1,
+            status="Present",
+            session_type="regular",
+            source_type="generated",
+        )
+    )
+    db.session.commit()
+
+    advice = generate_billing_advices_for_cycle(c2.id, student_id=s.id)[0]
+    assert advice.old_balance == 1000
+    assert advice.total_due >= advice.subtotal_sessions + 1000
+
+
+def test_billing_uses_real_carryforward_overpayment_only(session):
+    s, t = setup_basic()
+    s.overpayment_credit = 300
+    db.session.add(
+        AttendanceSession(
+            student_id=s.id,
+            therapist_id=t.id,
+            session_date=date(2026, 1, 8),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            duration_hours=1,
+            status="Present",
+            session_type="regular",
+            source_type="generated",
+        )
+    )
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.overpayment_credit == 300
+    assert advice.total_due == max(
+        round(
+            advice.subtotal_sessions
+            + advice.old_balance
+            + advice.required_deposit_charge
+            + advice.assessment_deposit_charge
+            - 300,
+            2,
+        ),
+        0,
+    )

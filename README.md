@@ -9,6 +9,7 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 - Billing now consistently includes effective rendered billable session charges for the selected billing period.
 - Billing advice output now clearly shows rendered-hour basis (regular, make-up, total rendered, billable, non-billable).
 - Deposit payments are now applied to deposit obligations correctly and no longer misclassified as full overpayments.
+- Fixed structural billing bug where deposit-paid amounts were incorrectly reused as general credit and zeroed-out new billing advice totals.
 
 ### Version 9.3
 - Added Excel export for Required Deposit payment history (all students and per student).
