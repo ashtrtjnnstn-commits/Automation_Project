@@ -32,9 +32,10 @@
 
   <label>Status
     <select name="status">
-      <option value="Open" {% if advice.status == 'Open' %}selected{% endif %}>Open</option>
+      <option value="Draft" {% if advice.status == 'Draft' or advice.status == 'Open' %}selected{% endif %}>Draft</option>
+      <option value="Issued" {% if advice.status == 'Issued' %}selected{% endif %}>Issued</option>
       <option value="Paid" {% if advice.status == 'Paid' %}selected{% endif %}>Paid</option>
-      <option value="Partial" {% if advice.status == 'Partial' %}selected{% endif %}>Partial</option>
+      <option value="Archived" {% if advice.status == 'Archived' %}selected{% endif %}>Archived</option>
     </select>
   </label>
   <label>Remarks <textarea name="remarks">{{ remarks }}</textarea></label>

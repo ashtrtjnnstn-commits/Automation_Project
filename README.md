@@ -4,6 +4,11 @@ A clean rebuild of a therapy center operations app with a local Flask server, SQ
 
 ## Patch Notes
 
+### Phase 1 Hardening
+- Automatic local database backups now run on app startup with retention of the latest 7 backups.
+- Billing advice can now be locked by status: Draft, Issued, Paid, Archived.
+- Added audit log tracking for key operational actions.
+
 ### Version 9.6
 - Billing advice can now be edited from the dashboard.
 - Billing advice can now be deleted from the dashboard.

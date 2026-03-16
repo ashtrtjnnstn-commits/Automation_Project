@@ -11,6 +11,7 @@ from .routes.web import web_bp
 from .services.attendance_service import generate_monthly_sessions
 from .services.billing_service import generate_billing_cycles_for_range, generate_billing_advices_for_cycle
 from .services.seed_service import seed_sample_data
+from .utils.backup_utils import backup_sqlite_database
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -28,6 +29,9 @@ def create_app(test_config: dict | None = None) -> Flask:
     db.init_app(app)
     app.register_blueprint(web_bp)
     register_cli(app)
+
+    with app.app_context():
+        backup_sqlite_database(app.config.get("SQLALCHEMY_DATABASE_URI", ""))
 
     return app
 

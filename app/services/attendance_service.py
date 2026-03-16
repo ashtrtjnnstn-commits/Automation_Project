@@ -6,7 +6,8 @@ from calendar import monthrange
 
 from sqlalchemy import and_
 
-from app.models import AttendanceSession, AuditLog, RegularSchedule, SessionOverride, db
+from app.models import AttendanceSession, RegularSchedule, SessionOverride, db
+from app.utils.audit_utils import log_audit
 
 RENDERED_STATUSES = {"Present", "Make-up", "Rescheduled", "Billed", "Non-billable"}
 MISSED_STATUSES = {"Absent", "Rescheduled", "Cancelled"}
@@ -56,9 +57,9 @@ def generate_monthly_sessions(year: int, month: int) -> int:
             )
             db.session.add(session)
             created += 1
-    if created:
-        db.session.add(AuditLog(action="generate_month", entity_type="AttendanceSession", details=f"{year}-{month:02d}: {created}"))
     db.session.commit()
+    if created:
+        log_audit("attendance_generate_month", "AttendanceSession", None, f"{year}-{month:02d}: {created}")
     return created
 
 
@@ -94,8 +95,8 @@ def create_makeup_session(
         reason=notes,
     )
     db.session.add(override)
-    db.session.add(AuditLog(action="add_makeup", entity_type="AttendanceSession", entity_id=session.id, details=notes))
     db.session.commit()
+    log_audit("makeup_session_created", "AttendanceSession", session.id, notes)
     return session
 
 
@@ -105,8 +106,8 @@ def update_session_status(session_id: int, status: str, notes: str = "") -> None
     session.status = status
     if notes:
         session.notes = notes
-    db.session.add(AuditLog(action="status_change", entity_type="AttendanceSession", entity_id=session_id, details=f"{old}->{status}"))
     db.session.commit()
+    log_audit("attendance_status_updated", "AttendanceSession", session_id, f"{old}->{status}")
 
 
 def get_month_sessions(year: int, month: int, therapist_id: int | None = None, student_id: int | None = None):

@@ -4,7 +4,6 @@ from datetime import date
 
 from app.models import (
     AssessmentDepositLedger,
-    AuditLog,
     BillingAdvice,
     Payment,
     PaymentAllocation,
@@ -13,6 +12,7 @@ from app.models import (
     db,
 )
 from app.services.billing_service import initialize_required_deposit
+from app.utils.audit_utils import log_audit
 
 
 def record_payment(
@@ -50,7 +50,11 @@ def record_payment(
         db.session.add(payment)
         db.session.flush()
 
-        open_advices = BillingAdvice.query.filter_by(student_id=student_id, status="Open").order_by(BillingAdvice.created_at).all()
+        open_advices = (
+            BillingAdvice.query.filter(BillingAdvice.student_id == student_id, BillingAdvice.status.in_(["Draft", "Issued", "Open"]))
+            .order_by(BillingAdvice.created_at)
+            .all()
+        )
 
         is_required_deposit_payment = purpose == "Required Deposit"
         is_assessment_deposit_payment = purpose == "Assessment Deposit"
@@ -132,7 +136,10 @@ def record_payment(
         elif is_assessment_deposit_payment:
             payment.balance_after_payment = round(max(student.assessment_deposit_total - student.assessment_deposit_paid, 0), 2)
         else:
-            latest_open = BillingAdvice.query.filter_by(student_id=student_id, status="Open").all()
+            latest_open = (
+                BillingAdvice.query.filter(BillingAdvice.student_id == student_id, BillingAdvice.status.in_(["Draft", "Issued", "Open"]))
+                .all()
+            )
             payment.balance_after_payment = round(sum(a.total_due for a in latest_open), 2)
 
         if manual_overpayment is not None:
@@ -140,9 +147,11 @@ def record_payment(
         if manual_balance is not None:
             payment.balance_after_payment = manual_balance
 
-        db.session.add(AuditLog(action="payment_recorded", entity_type="Payment", entity_id=payment.id, details=f"amount={amount}"))
-
     db.session.commit()
+    try:
+        log_audit("payment_recorded", "Payment", payment.id, f"amount={amount}")
+    except Exception:
+        pass
     return payment
 
 

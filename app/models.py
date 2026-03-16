@@ -129,7 +129,7 @@ class BillingAdvice(TimestampMixin, db.Model):
     required_deposit_charge = db.Column(db.Float, default=0.0, nullable=False)
     assessment_deposit_charge = db.Column(db.Float, default=0.0, nullable=False)
     total_due = db.Column(db.Float, default=0.0, nullable=False)
-    status = db.Column(db.String(20), default="Open", nullable=False)
+    status = db.Column(db.String(20), default="Draft", nullable=False)
 
     student = db.relationship("Student", backref="billing_advices")
     billing_cycle = db.relationship("BillingCycle", backref="billing_advices")

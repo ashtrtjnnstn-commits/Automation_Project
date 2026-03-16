@@ -6,7 +6,6 @@ from datetime import date, timedelta
 from app.models import (
     AssessmentDepositLedger,
     AttendanceSession,
-    AuditLog,
     BillingAdvice,
     BillingCycle,
     BillingLineItem,
@@ -17,6 +16,7 @@ from app.models import (
     Student,
     db,
 )
+from app.utils.audit_utils import log_audit
 BILLABLE_STATUSES = {"Present", "Make-up", "Rescheduled", "Billed"}
 RENDERED_BILLING_STATUSES = {"Present", "Make-up", "Rescheduled", "Billed", "Non-billable"}
 
@@ -150,7 +150,7 @@ def billing_hours_breakdown_for_advice(advice: BillingAdvice) -> dict[str, float
 
 
 def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = None) -> float:
-    query = BillingAdvice.query.filter_by(student_id=student_id, status="Open")
+    query = BillingAdvice.query.filter(BillingAdvice.student_id == student_id, BillingAdvice.status.in_(["Draft", "Open"]))
     if exclude_cycle_id is not None:
         query = query.filter(BillingAdvice.billing_cycle_id != exclude_cycle_id)
     open_advices = query.all()
@@ -296,7 +296,7 @@ def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = N
             advice.required_deposit_charge = required_charge
             advice.assessment_deposit_charge = assessment_charge
             advice.total_due = total_due
-            advice.status = "Open"
+            advice.status = "Draft"
             db.session.add(advice)
             db.session.flush()
 
@@ -312,16 +312,17 @@ def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = N
             student.overpayment_credit = 0.0
             created.append(advice)
 
-        db.session.add(AuditLog(action="billing_regeneration", entity_type="BillingCycle", entity_id=cycle.id, details=f"Advices generated for {'all students' if not student_id else f'student {student_id}'}"))
     db.session.commit()
+    for advice in created:
+        log_audit("billing_advice_created", "BillingAdvice", advice.id, f"cycle_id={cycle.id}")
     return created
 
 
 def due_summary(today: date) -> dict[str, list[BillingAdvice]]:
-    due_today = BillingAdvice.query.join(BillingCycle).filter(BillingAdvice.status == "Open", BillingCycle.due_date == today).all()
-    overdue = BillingAdvice.query.join(BillingCycle).filter(BillingAdvice.status == "Open", BillingCycle.due_date < today).all()
+    due_today = BillingAdvice.query.join(BillingCycle).filter(BillingAdvice.status.in_(["Draft", "Issued", "Open"]), BillingCycle.due_date == today).all()
+    overdue = BillingAdvice.query.join(BillingCycle).filter(BillingAdvice.status.in_(["Draft", "Issued", "Open"]), BillingCycle.due_date < today).all()
     upcoming = BillingAdvice.query.join(BillingCycle).filter(
-        BillingAdvice.status == "Open",
+        BillingAdvice.status.in_(["Draft", "Issued", "Open"]),
         BillingCycle.due_date > today,
         BillingCycle.due_date <= today + timedelta(days=3),
     ).all()

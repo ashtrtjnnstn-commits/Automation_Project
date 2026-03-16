@@ -48,11 +48,19 @@ from app.services.import_export_service import (
 )
 from app.services.payment_service import archive_payments, record_payment
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
+from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
 
 web_bp = Blueprint("web", __name__)
 
 ATTENDANCE_STATUSES = ["Present", "Absent", "Cancelled", "Make-up", "Rescheduled", "No Show", "Non-billable", "Billed"]
+BILLING_LOCKED_STATUSES = {"Issued", "Paid", "Archived"}
+BILLING_EDITABLE_STATUSES = {"Draft", "Open"}
+BILLING_ALLOWED_STATUSES = {"Draft", "Issued", "Paid", "Archived"}
+
+
+def _is_billing_advice_editable(advice: BillingAdvice) -> bool:
+    return advice.status in BILLING_EDITABLE_STATUSES
 
 
 @web_bp.route("/")
@@ -122,7 +130,10 @@ def daily_schedule():
 def student_profile(student_id: int):
     student = Student.query.get_or_404(student_id)
     sessions = AttendanceSession.query.filter_by(student_id=student.id).order_by(AttendanceSession.session_date.desc()).limit(20).all()
-    open_advices = BillingAdvice.query.filter_by(student_id=student.id, status="Open").all()
+    open_advices = (
+        BillingAdvice.query.filter(BillingAdvice.student_id == student.id, BillingAdvice.status.in_(["Draft", "Issued", "Open"]))
+        .all()
+    )
     missed_summary = missed_recovery_summary(student_id=student.id)
     return render_template("student_profile.html", student=student, sessions=sessions, open_advices=open_advices, missed_summary=missed_summary)
 
@@ -261,6 +272,10 @@ def billing_edit(advice_id: int):
     advice = BillingAdvice.query.get_or_404(advice_id)
     cycle = advice.billing_cycle
 
+    if not _is_billing_advice_editable(advice):
+        flash("Billing advice is locked and cannot be edited.", "error")
+        return redirect(url_for("web.billing_page", student_id=advice.student_id))
+
     if request.method == "POST":
         cycle.start_date = datetime.strptime(request.form["cycle_start"], "%Y-%m-%d").date()
         cycle.end_date = datetime.strptime(request.form["cycle_end"], "%Y-%m-%d").date()
@@ -273,7 +288,9 @@ def billing_edit(advice_id: int):
         advice.old_balance = float(request.form.get("old_balance", advice.old_balance) or 0)
         advice.overpayment_credit = float(request.form.get("credit", advice.overpayment_credit) or 0)
         advice.total_due = float(request.form.get("total_due", advice.total_due) or 0)
-        advice.status = request.form.get("status", advice.status)
+        form_status = request.form.get("status", advice.status)
+        if form_status in BILLING_ALLOWED_STATUSES:
+            advice.status = form_status
 
         remarks = request.form.get("remarks", "")
         notes_item = BillingLineItem.query.filter_by(billing_advice_id=advice.id, item_type="billing_remarks").first()
@@ -304,6 +321,7 @@ def billing_edit(advice_id: int):
                 db.session.add(BillingLineItem(billing_advice_id=advice.id, item_type=item_type, description=item_type.replace("_", " ").title(), quantity=float(value or 0), rate=0, amount=0))
 
         db.session.commit()
+        log_audit("billing_advice_edited", "BillingAdvice", advice.id, "Manual advice edit")
         flash("Billing advice updated.", "success")
         return redirect(url_for("web.billing_page", student_id=advice.student_id))
 
@@ -312,18 +330,39 @@ def billing_edit(advice_id: int):
     return render_template("billing_edit.html", advice=advice, cycle=cycle, hours=hours, remarks=(remarks_item.description if remarks_item else ""))
 
 
+@web_bp.post("/billing/<int:advice_id>/status")
+def billing_mark_status(advice_id: int):
+    advice = BillingAdvice.query.get_or_404(advice_id)
+    new_status = request.form.get("status", "").strip()
+    if new_status not in BILLING_ALLOWED_STATUSES:
+        flash("Invalid billing advice status.", "error")
+        return redirect(url_for("web.billing_page", student_id=advice.student_id))
+
+    old_status = advice.status
+    advice.status = new_status
+    db.session.commit()
+    log_audit(f"billing_advice_marked_{new_status.lower()}", "BillingAdvice", advice.id, f"{old_status}->{new_status}")
+    flash(f"Billing advice marked as {new_status}.", "success")
+    return redirect(url_for("web.billing_page", student_id=advice.student_id))
+
+
 @web_bp.post("/billing/<int:advice_id>/delete")
 def billing_delete(advice_id: int):
     advice = BillingAdvice.query.get_or_404(advice_id)
+    if not _is_billing_advice_editable(advice):
+        flash("Billing advice is locked and cannot be deleted.", "error")
+        return redirect(url_for("web.billing_page", student_id=advice.student_id))
     if advice.payment_allocations:
         flash("Cannot delete billing advice with linked payment allocations.", "error")
         return redirect(url_for("web.billing_page", student_id=advice.student_id))
 
+    aid = advice.id
     BillingLineItem.query.filter_by(billing_advice_id=advice.id).delete()
     RequiredDepositLedger.query.filter_by(billing_advice_id=advice.id).delete()
     AssessmentDepositLedger.query.filter_by(billing_advice_id=advice.id).delete()
     db.session.delete(advice)
     db.session.commit()
+    log_audit("billing_advice_deleted", "BillingAdvice", aid, "Advice deleted")
     flash("Billing advice deleted.", "success")
     return redirect(url_for("web.billing_page", student_id=advice.student_id))
 
@@ -422,6 +461,7 @@ def edit_payment(payment_id: int):
         payment.notes = request.form.get("notes", "")
 
         db.session.commit()
+        log_audit("payment_edited", "Payment", payment.id, "Payment edited from web form")
         flash(f"Payment entry {payment.id} updated.", "success")
         return redirect(url_for("web.payments_tracker"))
 

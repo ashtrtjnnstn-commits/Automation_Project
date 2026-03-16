@@ -9,6 +9,7 @@ from app.models import (
     AdminStaff,
     AssessmentDepositLedger,
     AttendanceSession,
+    AuditLog,
     BillingAdvice,
     PaymentAllocation,
     Payment,
@@ -28,6 +29,7 @@ from app.services.import_export_service import (
     export_required_deposit_payment_history,
 )
 from app.services.payment_service import record_payment
+from app.utils.backup_utils import backup_sqlite_database
 
 
 def setup_basic():
@@ -1105,7 +1107,7 @@ def test_editing_billing_advice_updates_record(session, client):
             "old_balance": "300.00",
             "credit": "50.00",
             "total_due": "1549.00",
-            "status": "Partial",
+            "status": "Draft",
             "remarks": "manual correction",
         },
         follow_redirects=True,
@@ -1117,7 +1119,7 @@ def test_editing_billing_advice_updates_record(session, client):
     assert advice.billing_cycle.end_date == date(2026, 1, 16)
     assert advice.subtotal_sessions == 999.0
     assert advice.total_due == 1549.0
-    assert advice.status == "Partial"
+    assert advice.status == "Draft"
 
 
 def test_deleting_billing_advice_works_when_safe(session, client):
@@ -1267,3 +1269,151 @@ def test_non_billable_logic_still_works_with_billed_status(session):
     hours = billing_hours_breakdown(s.id, date(2026, 1, 1), date(2026, 1, 15))
     assert hours["non_billable_hours"] == 1
     assert hours["billable_hours"] == 1
+
+
+def test_backup_creates_copy_when_db_exists(tmp_path):
+    db_file = tmp_path / "app.db"
+    db_file.write_text("db-bytes")
+    backup = backup_sqlite_database(f"sqlite:///{db_file}")
+    assert backup is not None
+    assert backup.exists()
+    assert backup.parent.name == "backups"
+
+
+def test_backup_retention_keeps_latest_seven(tmp_path):
+    db_file = tmp_path / "app.db"
+    db_file.write_text("db-bytes")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(9):
+        p = backup_dir / f"app_20260101_00000{i}.db"
+        p.write_text(str(i))
+
+    backup_sqlite_database(f"sqlite:///{db_file}", keep=7)
+    assert len(list(backup_dir.glob("app_*.db"))) == 7
+
+
+def test_editing_issued_billing_advice_is_blocked(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice.status = "Issued"
+    db.session.commit()
+
+    res = client.post(
+        f"/billing/{advice.id}/edit",
+        data={
+            "cycle_start": "2026-01-02",
+            "cycle_end": "2026-01-16",
+            "issue_date": "2026-01-16",
+            "due_date": "2026-01-21",
+            "session_subtotal": "999.00",
+        },
+        follow_redirects=True,
+    )
+    assert res.status_code == 200
+    assert b"locked and cannot be edited" in res.data
+
+
+def test_deleting_issued_paid_archived_billing_advice_is_blocked(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+
+    for status in ["Issued", "Paid", "Archived"]:
+        advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+        advice.status = status
+        db.session.commit()
+
+        res = client.post(f"/billing/{advice.id}/delete", follow_redirects=True)
+        assert res.status_code == 200
+        assert b"locked and cannot be deleted" in res.data
+
+
+def test_marking_billing_advice_status_updates(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    res = client.post(f"/billing/{advice.id}/status", data={"status": "Issued"}, follow_redirects=True)
+    assert res.status_code == 200
+    db.session.refresh(advice)
+    assert advice.status == "Issued"
+
+
+def test_audit_logs_created_for_key_actions(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    target = AttendanceSession.query.first()
+
+    client.post(
+        "/attendance/daily",
+        data={"selected_date": target.session_date.isoformat(), "session_ids": [str(target.id)], f"status_{target.id}": "Present"},
+        follow_redirects=True,
+    )
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    client.post(
+        f"/billing/{advice.id}/edit",
+        data={
+            "cycle_start": cycle.start_date.isoformat(),
+            "cycle_end": cycle.end_date.isoformat(),
+            "issue_date": cycle.issue_date.isoformat(),
+            "due_date": cycle.due_date.isoformat(),
+            "session_subtotal": "777",
+        },
+        follow_redirects=True,
+    )
+    client.post(f"/billing/{advice.id}/status", data={"status": "Issued"}, follow_redirects=True)
+    client.post(f"/billing/{advice.id}/status", data={"status": "Paid"}, follow_redirects=True)
+    client.post(f"/billing/{advice.id}/status", data={"status": "Archived"}, follow_redirects=True)
+
+    c2 = generate_billing_cycles_for_range(date(2026, 1, 16), date(2026, 1, 31))[0]
+    advice_to_delete = generate_billing_advices_for_cycle(c2.id, student_id=s.id)[0]
+    client.post(f"/billing/{advice_to_delete.id}/delete", follow_redirects=True)
+
+    client.post(f"/payments", data={"student_id": s.id, "amount": 100, "payment_date": "2026-01-10"}, follow_redirects=True)
+    payment = Payment.query.order_by(Payment.id.desc()).first()
+    client.post(
+        f"/payments/{payment.id}/edit",
+        data={
+            "payment_date": "2026-01-10",
+            "student_id": s.id,
+            "purpose": "Therapy",
+            "amount": 100,
+            "overpayment_amount": 0,
+            "balance_after_payment": 0,
+        },
+        follow_redirects=True,
+    )
+
+    actions = {a.action for a in AuditLog.query.all()}
+    assert "billing_advice_created" in actions
+    assert "billing_advice_edited" in actions
+    assert "billing_advice_marked_issued" in actions
+    assert "billing_advice_marked_paid" in actions
+    assert "billing_advice_marked_archived" in actions
+    assert "billing_advice_deleted" in actions
+    assert "payment_recorded" in actions
+    assert "payment_edited" in actions
+    assert "attendance_status_updated" in actions
+
+
+def test_audit_logging_failure_does_not_crash_workflow(session, monkeypatch):
+    s, _ = setup_basic()
+    import app.services.payment_service as payment_service
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("audit failed")
+
+    monkeypatch.setattr(payment_service, "log_audit", boom)
+    payment = record_payment(s.id, 100, date(2026, 1, 10))
+    assert payment.id is not None

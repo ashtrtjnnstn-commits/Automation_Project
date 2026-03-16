@@ -34,11 +34,12 @@
 {% if generated_advices %}
 <h3>Generated Advice (Current Action)</h3>
 <table>
-  <tr><th>Student</th><th>Billing Period</th><th>Regular Rendered Hours</th><th>Make-up Rendered Hours</th><th>Billed Hours</th><th>Total Rendered Hours</th><th>Billable Hours</th><th>Non-billable Hours</th><th>Session Subtotal</th><th>Deposits</th><th>Old Balance/Credit</th><th>Total Due</th><th>Actions</th></tr>
+  <tr><th>Student</th><th>Billing Period</th><th>Status</th><th>Regular Rendered Hours</th><th>Make-up Rendered Hours</th><th>Billed Hours</th><th>Total Rendered Hours</th><th>Billable Hours</th><th>Non-billable Hours</th><th>Session Subtotal</th><th>Deposits</th><th>Old Balance/Credit</th><th>Total Due</th><th>Actions</th></tr>
   {% for a in generated_advices %}
   <tr>
     <td>{{ a.student.name }}</td>
     <td>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }}</td>
+    <td>{{ a.status }}</td>
     <td>{{ advice_hours[a.id].regular_rendered_hours }}</td>
     <td>{{ advice_hours[a.id].makeup_rendered_hours }}</td>
     <td>{{ advice_hours[a.id].billed_hours }}</td>
@@ -50,10 +51,30 @@
     <td>Old: {{ a.old_balance }} / Credit: {{ a.overpayment_credit }}</td>
     <td>{{ a.total_due }}</td>
     <td>
+      {% if a.status in ["Draft", "Open"] %}
       <a href="{{ url_for('web.billing_edit', advice_id=a.id) }}">Edit</a>
       <form method="post" action="{{ url_for('web.billing_delete', advice_id=a.id) }}" style="display:inline;">
         <button type="submit" onclick="return confirm('Delete this billing advice?');">Delete</button>
       </form>
+      {% endif %}
+      {% if a.status != "Issued" %}
+      <form method="post" action="{{ url_for('web.billing_mark_status', advice_id=a.id) }}" style="display:inline;">
+        <input type="hidden" name="status" value="Issued" />
+        <button type="submit">Mark Issued</button>
+      </form>
+      {% endif %}
+      {% if a.status != "Paid" %}
+      <form method="post" action="{{ url_for('web.billing_mark_status', advice_id=a.id) }}" style="display:inline;">
+        <input type="hidden" name="status" value="Paid" />
+        <button type="submit">Mark Paid</button>
+      </form>
+      {% endif %}
+      {% if a.status != "Archived" %}
+      <form method="post" action="{{ url_for('web.billing_mark_status', advice_id=a.id) }}" style="display:inline;">
+        <input type="hidden" name="status" value="Archived" />
+        <button type="submit">Archive</button>
+      </form>
+      {% endif %}
     </td>
   </tr>
   {% endfor %}
@@ -64,7 +85,7 @@
 <h3>Recent Advice for Selected Student</h3>
 <ul>
   {% for a in student_advices %}
-  <li>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Regular {{ recent_advice_hours[a.id].regular_rendered_hours }} | Make-up {{ recent_advice_hours[a.id].makeup_rendered_hours }} | Billed {{ recent_advice_hours[a.id].billed_hours }} | Total Rendered {{ recent_advice_hours[a.id].total_rendered_hours }} | Billable {{ recent_advice_hours[a.id].billable_hours }} | Non-billable {{ recent_advice_hours[a.id].non_billable_hours }} | Subtotal {{ a.subtotal_sessions }} | Old Bal {{ a.old_balance }} | Due {{ a.total_due }} | <a href="{{ url_for('web.billing_edit', advice_id=a.id) }}">Edit</a> <form method="post" action="{{ url_for('web.billing_delete', advice_id=a.id) }}" style="display:inline;"><button type="submit" onclick="return confirm('Delete this billing advice?');">Delete</button></form></li>
+  <li>{{ a.billing_cycle.start_date }} to {{ a.billing_cycle.end_date }} | Status {{ a.status }} | Regular {{ recent_advice_hours[a.id].regular_rendered_hours }} | Make-up {{ recent_advice_hours[a.id].makeup_rendered_hours }} | Billed {{ recent_advice_hours[a.id].billed_hours }} | Total Rendered {{ recent_advice_hours[a.id].total_rendered_hours }} | Billable {{ recent_advice_hours[a.id].billable_hours }} | Non-billable {{ recent_advice_hours[a.id].non_billable_hours }} | Subtotal {{ a.subtotal_sessions }} | Old Bal {{ a.old_balance }} | Due {{ a.total_due }} {% if a.status in ["Draft", "Open"] %}| <a href="{{ url_for('web.billing_edit', advice_id=a.id) }}">Edit</a> <form method="post" action="{{ url_for('web.billing_delete', advice_id=a.id) }}" style="display:inline;"><button type="submit" onclick="return confirm('Delete this billing advice?');">Delete</button></form>{% endif %}</li>
   {% endfor %}
 </ul>
 {% endif %}
