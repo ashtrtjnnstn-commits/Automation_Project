@@ -60,7 +60,16 @@ def dashboard():
     today = date.today()
     due = due_summary(today)
     recent_advices = BillingAdvice.query.order_by(BillingAdvice.created_at.desc()).limit(10).all()
-    return render_template("dashboard.html", due=due, today=today, recent_advices=recent_advices)
+    students = Student.query.order_by(Student.name).all()
+    makeup_obligations = {s.id: missed_recovery_summary(student_id=s.id) for s in students}
+    return render_template(
+        "dashboard.html",
+        due=due,
+        today=today,
+        recent_advices=recent_advices,
+        students=students,
+        makeup_obligations=makeup_obligations,
+    )
 
 
 @web_bp.route("/attendance", methods=["GET", "POST"])
@@ -161,15 +170,6 @@ def weekly_reports():
     archives = WeeklyReportArchive.query.order_by(WeeklyReportArchive.week_start.desc()).limit(20).all()
     students = Student.query.all()
     student_hours = weekly_student_hours(start, end)
-    student_missed_recovery = {
-        s.id: missed_recovery_summary(start_date=start, end_date=end, student_id=s.id)
-        for s in students
-    }
-    missed_summary = {
-        "missed_hours": round(sum(v["missed_hours"] for v in student_missed_recovery.values()), 2),
-        "recovered_makeup_hours": round(sum(v["recovered_makeup_hours"] for v in student_missed_recovery.values()), 2),
-        "remaining_missed_hours": round(sum(v["remaining_missed_hours"] for v in student_missed_recovery.values()), 2),
-    }
     return render_template(
         "weekly_reports.html",
         start=start,
@@ -182,8 +182,6 @@ def weekly_reports():
         therapists={t.id: t for t in Therapist.query.all()},
         admins={a.id: a for a in AdminStaff.query.all()},
         archives=archives,
-        missed_summary=missed_summary,
-        student_missed_recovery=student_missed_recovery,
     )
 
 

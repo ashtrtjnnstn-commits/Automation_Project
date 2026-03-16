@@ -644,6 +644,56 @@ def test_student_b_makeup_does_not_reduce_student_a_remaining(session):
     assert s2_summary["remaining_missed_hours"] == 0.0
 
 
+
+
+def test_dashboard_shows_cumulative_outstanding_makeup_obligations(session, client):
+    s, t = setup_basic()
+    missed = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 1, 5),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="Cancelled",
+        session_type="regular",
+        source_type="generated",
+    )
+    recovered = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 2, 6),
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=0.5,
+        status="Present",
+        session_type="makeup",
+        source_type="manual",
+    )
+    db.session.add_all([missed, recovered])
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=missed.id, new_session_id=recovered.id, override_type="makeup"))
+    db.session.commit()
+
+    res = client.get("/")
+    assert res.status_code == 200
+    assert b"Outstanding Make-up Obligations" in res.data
+    assert b"Total Missed Hours To Date" in res.data
+    assert b"Total Recovered Make-up Hours To Date" in res.data
+    assert b"Outstanding Make-up Hours" in res.data
+    assert b"1.0" in res.data
+    assert b"0.5" in res.data
+
+
+def test_weekly_reports_no_longer_shows_missed_vs_makeup_block(session, client):
+    s, _ = setup_basic()
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+
+    res = client.get("/reports/weekly?date=2026-01-05")
+    assert res.status_code == 200
+    assert b"Missed vs Make-up Recovery" not in res.data
+
 def test_rendered_billable_sessions_produce_non_zero_subtotal(session):
     s, _ = setup_basic()
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
