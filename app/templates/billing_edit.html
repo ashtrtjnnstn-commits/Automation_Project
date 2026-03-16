@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Edit Billing Advice #{{ advice.id }}</h2>
+<form method="post">
+  <fieldset>
+    <legend>Cycle</legend>
+    <label>Cycle Start <input type="date" name="cycle_start" value="{{ cycle.start_date }}" required /></label>
+    <label>Cycle End <input type="date" name="cycle_end" value="{{ cycle.end_date }}" required /></label>
+    <label>Issue Date <input type="date" name="issue_date" value="{{ cycle.issue_date }}" required /></label>
+    <label>Due Date <input type="date" name="due_date" value="{{ cycle.due_date }}" required /></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Hours</legend>
+    <label>Regular Rendered Hours <input type="number" step="0.01" name="regular_rendered_hours" value="{{ hours.regular_rendered_hours }}" /></label>
+    <label>Make-up Rendered Hours <input type="number" step="0.01" name="makeup_rendered_hours" value="{{ hours.makeup_rendered_hours }}" /></label>
+    <label>Billed Hours <input type="number" step="0.01" name="billed_hours" value="{{ hours.billed_hours }}" /></label>
+    <label>Total Rendered Hours <input type="number" step="0.01" name="total_rendered_hours" value="{{ hours.total_rendered_hours }}" /></label>
+    <label>Billable Hours <input type="number" step="0.01" name="billable_hours" value="{{ hours.billable_hours }}" /></label>
+    <label>Non-billable Hours <input type="number" step="0.01" name="non_billable_hours" value="{{ hours.non_billable_hours }}" /></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Amounts</legend>
+    <label>Session Subtotal <input type="number" step="0.01" name="session_subtotal" value="{{ advice.subtotal_sessions }}" /></label>
+    <label>Required Deposit <input type="number" step="0.01" name="required_deposit" value="{{ advice.required_deposit_charge }}" /></label>
+    <label>Assessment Deposit <input type="number" step="0.01" name="assessment_deposit" value="{{ advice.assessment_deposit_charge }}" /></label>
+    <label>Old Balance <input type="number" step="0.01" name="old_balance" value="{{ advice.old_balance }}" /></label>
+    <label>Credit <input type="number" step="0.01" name="credit" value="{{ advice.overpayment_credit }}" /></label>
+    <label>Total Due <input type="number" step="0.01" name="total_due" value="{{ advice.total_due }}" /></label>
+  </fieldset>
+
+  <label>Status
+    <select name="status">
+      <option value="Draft" {% if advice.status == 'Draft' or advice.status == 'Open' %}selected{% endif %}>Draft</option>
+      <option value="Issued" {% if advice.status == 'Issued' %}selected{% endif %}>Issued</option>
+      <option value="Paid" {% if advice.status == 'Paid' %}selected{% endif %}>Paid</option>
+      <option value="Archived" {% if advice.status == 'Archived' %}selected{% endif %}>Archived</option>
+    </select>
+  </label>
+  <label>Remarks <textarea name="remarks">{{ remarks }}</textarea></label>
+
+  <button type="submit">Save Billing Advice</button>
+  <a href="{{ url_for('web.billing_page', student_id=advice.student_id) }}">Cancel</a>
+</form>
+{% endblock %}

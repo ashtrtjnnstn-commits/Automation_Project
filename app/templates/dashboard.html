@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Dashboard - {{ today }}</h2>
+<div class="cards">
+  <section>
+    <h3>Due Today</h3>
+    <ul>{% for a in due.due_today %}<li><a href="{{ url_for('web.student_profile', student_id=a.student_id) }}">{{ a.student.name }}</a> - {{ a.total_due }}</li>{% else %}<li>None</li>{% endfor %}</ul>
+  </section>
+  <section>
+    <h3>Overdue</h3>
+    <ul>{% for a in due.overdue %}<li><a href="{{ url_for('web.student_profile', student_id=a.student_id) }}">{{ a.student.name }}</a> - {{ a.total_due }}</li>{% else %}<li>None</li>{% endfor %}</ul>
+  </section>
+  <section>
+    <h3>Upcoming (3 days)</h3>
+    <ul>{% for a in due.upcoming %}<li><a href="{{ url_for('web.student_profile', student_id=a.student_id) }}">{{ a.student.name }}</a> - {{ a.total_due }}</li>{% else %}<li>None</li>{% endfor %}</ul>
+  </section>
+</div>
+
+<h3>Outstanding Make-up Obligations</h3>
+<table>
+  <tr>
+    <th>Student Name</th>
+    <th>Total Missed Hours To Date</th>
+    <th>Total Recovered Make-up Hours To Date</th>
+    <th>Outstanding Make-up Hours</th>
+  </tr>
+  {% for student in students %}
+  <tr>
+    <td>{{ student.name }}</td>
+    <td>{{ makeup_obligations[student.id].missed_hours }}</td>
+    <td>{{ makeup_obligations[student.id].recovered_makeup_hours }}</td>
+    <td>{{ makeup_obligations[student.id].remaining_missed_hours }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4">No students yet.</td></tr>
+  {% endfor %}
+</table>
+
+<h3>Recent Billing Advice</h3>
+<ul>
+  {% for advice in recent_advices %}
+    <li>{{ advice.student.name }} | {{ advice.billing_cycle.start_date }} to {{ advice.billing_cycle.end_date }} | Due {{ advice.billing_cycle.due_date }} | {{ advice.total_due }}</li>
+  {% else %}
+    <li>No advice records yet.</li>
+  {% endfor %}
+</ul>
+
+<p><a href="{{ url_for('web.export_reports_page') }}">Go to Export Reports</a></p>
+{% endblock %}

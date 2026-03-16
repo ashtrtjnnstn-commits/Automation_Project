@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Archived Weekly Report Snapshot</h2>
+<p>Week: {{ archive.week_start }} to {{ archive.week_end }}</p>
+<p>Archived at: {{ archive.created_at }}</p>
+<p>Note: {{ archive.note or '-' }}</p>
+
+<h3>Student Rendered Hours</h3>
+<ul>{% for row in sections.student %}<li>{{ row.reference_name }}: {{ row.hours }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
+
+<h3>Therapist Rendered Hours</h3>
+<ul>{% for row in sections.therapist %}<li>{{ row.reference_name }}: {{ row.hours }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
+
+<h3>Admin Hours</h3>
+<ul>{% for row in sections.admin %}<li>{{ row.reference_name }}: {{ row.hours }}</li>{% else %}<li>No data</li>{% endfor %}</ul>
+{% endblock %}
