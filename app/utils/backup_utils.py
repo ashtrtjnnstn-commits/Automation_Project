@@ -10,6 +10,28 @@ from app.utils.audit_utils import log_audit
 logger = logging.getLogger(__name__)
 
 
+def restore_sqlite_backup(database_uri: str, backup_path: str | Path) -> Path:
+    """Restore sqlite database from a backup file.
+
+    Note: restoring while the app is running can be unsafe; stop the app before using this.
+    """
+    if not database_uri.startswith("sqlite:///"):
+        raise ValueError("Restore is only supported for sqlite file databases.")
+
+    db_path = Path(database_uri.replace("sqlite:///", "", 1))
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+
+    selected_backup = Path(backup_path)
+    if not selected_backup.exists() or not selected_backup.is_file():
+        raise FileNotFoundError("Selected backup file was not found.")
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(selected_backup, db_path)
+    log_audit("backup_restored", "Database", None, str(selected_backup))
+    return db_path
+
+
 def backup_sqlite_database(database_uri: str, keep: int = 7) -> Path | None:
     """Create timestamped backup for sqlite file DB and prune old backups."""
     try:

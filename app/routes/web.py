@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from flask import Blueprint, flash, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, current_app, flash, redirect, render_template, request, send_file, url_for
 
 from app.models import (
     AdminAttendance,
@@ -50,6 +50,7 @@ from app.services.payment_service import archive_payments, record_payment
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
+from app.utils.backup_utils import restore_sqlite_backup
 
 web_bp = Blueprint("web", __name__)
 
@@ -70,6 +71,14 @@ def dashboard():
     recent_advices = BillingAdvice.query.order_by(BillingAdvice.created_at.desc()).limit(10).all()
     students = Student.query.order_by(Student.name).all()
     makeup_obligations = {s.id: missed_recovery_summary(student_id=s.id) for s in students}
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    backups = []
+    if database_uri.startswith("sqlite:///"):
+        db_path = Path(database_uri.replace("sqlite:///", "", 1))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        backup_dir = db_path.parent / "backups"
+        backups = sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
     return render_template(
         "dashboard.html",
         due=due,
@@ -77,7 +86,36 @@ def dashboard():
         recent_advices=recent_advices,
         students=students,
         makeup_obligations=makeup_obligations,
+        backups=backups,
     )
+
+
+@web_bp.route("/restore-backup/<filename>", methods=["POST"])
+def restore_backup(filename: str):
+    if filename != Path(filename).name or not filename.startswith("app_") or Path(filename).suffix != ".db":
+        flash("Invalid backup filename.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not database_uri.startswith("sqlite:///"):
+        flash("Restore is only supported for sqlite file databases.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    db_path = Path(database_uri.replace("sqlite:///", "", 1))
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+    backup_dir = db_path.parent / "backups"
+    selected_backup = (backup_dir / filename).resolve()
+
+    try:
+        if selected_backup.parent != backup_dir.resolve():
+            raise ValueError("Invalid backup filename.")
+        restore_sqlite_backup(database_uri, selected_backup)
+        flash("Backup restored. Stop the app before restoring in real use because this replaces the current database file.", "success")
+    except (FileNotFoundError, ValueError) as exc:
+        flash(str(exc), "error")
+
+    return redirect(url_for("web.dashboard"))
 
 
 @web_bp.route("/attendance", methods=["GET", "POST"])
