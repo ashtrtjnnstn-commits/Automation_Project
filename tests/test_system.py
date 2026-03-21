@@ -29,7 +29,7 @@ from app.services.import_export_service import (
     export_required_deposit_payment_history,
 )
 from app.services.payment_service import record_payment
-from app.utils.backup_utils import backup_sqlite_database
+from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
 
 
 def setup_basic():
@@ -1417,3 +1417,40 @@ def test_audit_logging_failure_does_not_crash_workflow(session, monkeypatch):
     monkeypatch.setattr(payment_service, "log_audit", boom)
     payment = record_payment(s.id, 100, date(2026, 1, 10))
     assert payment.id is not None
+
+
+def test_restore_replaces_database_from_selected_backup(tmp_path):
+    db_file = tmp_path / "app.db"
+    db_file.write_text("live-db")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_file = backup_dir / "app_20260101_000000.db"
+    backup_file.write_text("backup-db")
+
+    restore_sqlite_backup(f"sqlite:///{db_file}", backup_file)
+
+    assert db_file.read_text() == "backup-db"
+
+
+def test_restore_route_rejects_invalid_backup_filename(client):
+    res = client.post("/restore-backup/not_a_backup.txt", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Invalid backup filename." in res.data
+
+
+def test_restore_route_restores_selected_backup(app, client, tmp_path):
+    db_file = tmp_path / "app.db"
+    db_file.write_text("live-db")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_file = backup_dir / "app_20260101_000000.db"
+    backup_file.write_text("backup-db")
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
+
+    res = client.post(f"/restore-backup/{backup_file.name}", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Backup restored." in res.data
+    assert db_file.read_text() == "backup-db"

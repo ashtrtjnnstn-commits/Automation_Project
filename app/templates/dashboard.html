@@ -45,5 +45,27 @@
   {% endfor %}
 </ul>
 
+
+<h3>Database Backups</h3>
+<p><strong>Warning:</strong> Restore should be done while the app is stopped. Restoring now will replace the current database file.</p>
+<table>
+  <tr>
+    <th>Backup File</th>
+    <th>Restore</th>
+  </tr>
+  {% for backup in backups %}
+  <tr>
+    <td>{{ backup.name }}</td>
+    <td>
+      <form method="post" action="{{ url_for('web.restore_backup', filename=backup.name) }}" onsubmit="return confirm('Restore this backup? This will replace the current database.');">
+        <button type="submit">Restore</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="2">No backups found.</td></tr>
+  {% endfor %}
+</table>
+
 <p><a href="{{ url_for('web.export_reports_page') }}">Go to Export Reports</a></p>
 {% endblock %}
