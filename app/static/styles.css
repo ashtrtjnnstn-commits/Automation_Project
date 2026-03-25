@@ -15,3 +15,20 @@ th, td { border: 1px solid #e5e7eb; padding: 0.5rem; vertical-align: top; }
 .flash.error { background: #fee2e2; }
 
 .tag { background: #dbeafe; color: #1d4ed8; padding: 0.1rem 0.4rem; border-radius: 9999px; font-size: 0.75rem; margin-left: 0.25rem; }
+
+.reminder.pending { border-left: 4px solid #dc2626; }
+.reminder.done { border-left: 4px solid #16a34a; }
+
+.dashboard-group { margin-bottom: 0.75rem; }
+.dashboard-group > summary { cursor: pointer; margin: 0.35rem 0; }
+.dashboard-group[open] { border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.5rem; background: #ffffff; }
+
+.summary-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; background: #e2e8f0; padding: 0.5rem; border-radius: 8px; }
+.summary-strip a, .summary-strip span { background: #ffffff; padding: 0.25rem 0.5rem; border-radius: 999px; text-decoration: none; color: #1f2937; }
+.action-card { border-left: 4px solid #94a3b8; }
+.action-card.pending { border-left-color: #dc2626; }
+.action-card.attention { border-left-color: #d97706; }
+.action-card.done { border-left-color: #16a34a; }
+.status-label { display: inline-block; font-size: 0.8rem; font-weight: 600; }
+.primary-action { display: inline-block; background: #1d4ed8; color: #ffffff; padding: 0.3rem 0.6rem; border-radius: 6px; text-decoration: none; }
+.quick-links a { margin-right: 0.5rem; }

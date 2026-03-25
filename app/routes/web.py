@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from calendar import monthrange
 from pathlib import Path
 
-from flask import Blueprint, flash, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, current_app, flash, redirect, render_template, request, send_file, url_for
 
 from app.models import (
     AdminAttendance,
@@ -46,10 +47,11 @@ from app.services.import_export_service import (
     import_students_and_schedules,
     import_therapists,
 )
-from app.services.payment_service import archive_payments, record_payment
+from app.services.payment_service import apply_payment_search, archive_payments, record_payment
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
+from app.utils.backup_utils import restore_sqlite_backup
 
 web_bp = Blueprint("web", __name__)
 
@@ -63,13 +65,75 @@ def _is_billing_advice_editable(advice: BillingAdvice) -> bool:
     return advice.status in BILLING_EDITABLE_STATUSES
 
 
-@web_bp.route("/")
+@web_bp.route("/", methods=["GET", "POST"])
 def dashboard():
     today = date.today()
+
+    if request.method == "POST" and request.form.get("action") == "save_admin_attendance":
+        row = AdminAttendance(
+            admin_id=int(request.form["admin_id"]),
+            attendance_date=datetime.strptime(request.form["attendance_date"], "%Y-%m-%d").date(),
+            status=request.form["status"],
+            shift_label=request.form.get("shift_label", ""),
+            hours_worked=float(request.form.get("hours_worked", 0) or 0),
+            notes=request.form.get("notes", ""),
+        )
+        db.session.add(row)
+        db.session.commit()
+        flash("Admin attendance saved.", "success")
+        return redirect(url_for("web.dashboard"))
+
     due = due_summary(today)
     recent_advices = BillingAdvice.query.order_by(BillingAdvice.created_at.desc()).limit(10).all()
     students = Student.query.order_by(Student.name).all()
     makeup_obligations = {s.id: missed_recovery_summary(student_id=s.id) for s in students}
+
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    backups = []
+    if database_uri.startswith("sqlite:///"):
+        db_path = Path(database_uri.replace("sqlite:///", "", 1))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        backup_dir = db_path.parent / "backups"
+        backups = sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+
+    month_last_day = monthrange(today.year, today.month)[1]
+    if today.day == month_last_day:
+        reminder_year, reminder_month = today.year, today.month
+    else:
+        prior_month_anchor = today.replace(day=1) - timedelta(days=1)
+        reminder_year, reminder_month = prior_month_anchor.year, prior_month_anchor.month
+
+    monthly_archive_done = (
+        db.session.query(Payment.id)
+        .filter(Payment.is_archived.is_(True), Payment.archive_year == reminder_year, Payment.archive_month == reminder_month)
+        .first()
+        is not None
+    )
+
+    last_sunday = today - timedelta(days=(today.weekday() + 1) % 7)
+    reminder_week_end = last_sunday
+    reminder_week_start = reminder_week_end - timedelta(days=6)
+    weekly_archive_done = WeeklyReportArchive.query.filter_by(week_start=reminder_week_start, week_end=reminder_week_end).first() is not None
+
+    last_month_archive = (
+        db.session.query(Payment.archive_year, Payment.archive_month)
+        .filter(Payment.is_archived.is_(True), Payment.archive_year.isnot(None), Payment.archive_month.isnot(None))
+        .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
+        .first()
+    )
+    last_week_archive = WeeklyReportArchive.query.order_by(WeeklyReportArchive.week_end.desc()).first()
+
+    today_admin_count = AdminAttendance.query.filter(AdminAttendance.attendance_date == today).count()
+    overdue_count = len(due["overdue"])
+    pending_tasks_count = (
+        (1 if overdue_count > 0 or len(due["due_today"]) > 0 else 0)
+        + (0 if monthly_archive_done else 1)
+        + (0 if weekly_archive_done else 1)
+    )
+
+    admin_records = AdminAttendance.query.order_by(AdminAttendance.attendance_date.desc()).limit(10).all()
+
     return render_template(
         "dashboard.html",
         due=due,
@@ -77,7 +141,49 @@ def dashboard():
         recent_advices=recent_advices,
         students=students,
         makeup_obligations=makeup_obligations,
+        backups=backups,
+        reminder_year=reminder_year,
+        reminder_month=reminder_month,
+        monthly_archive_done=monthly_archive_done,
+        weekly_archive_done=weekly_archive_done,
+        reminder_week_start=reminder_week_start,
+        reminder_week_end=reminder_week_end,
+        admins=AdminStaff.query.filter_by(active=True).order_by(AdminStaff.name).all(),
+        admin_records=admin_records,
+        overdue_count=overdue_count,
+        pending_tasks_count=pending_tasks_count,
+        today_admin_count=today_admin_count,
+        last_month_archive=last_month_archive,
+        last_week_archive=last_week_archive,
     )
+
+
+@web_bp.route("/restore-backup/<filename>", methods=["POST"])
+def restore_backup(filename: str):
+    if filename != Path(filename).name or not filename.startswith("app_") or Path(filename).suffix != ".db":
+        flash("Invalid backup filename.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not database_uri.startswith("sqlite:///"):
+        flash("Restore is only supported for sqlite file databases.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    db_path = Path(database_uri.replace("sqlite:///", "", 1))
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+    backup_dir = db_path.parent / "backups"
+    selected_backup = (backup_dir / filename).resolve()
+
+    try:
+        if selected_backup.parent != backup_dir.resolve():
+            raise ValueError("Invalid backup filename.")
+        restore_sqlite_backup(database_uri, selected_backup)
+        flash("Backup restored. Stop the app before restoring in real use because this replaces the current database file.", "success")
+    except (FileNotFoundError, ValueError) as exc:
+        flash(str(exc), "error")
+
+    return redirect(url_for("web.dashboard"))
 
 
 @web_bp.route("/attendance", methods=["GET", "POST"])
@@ -173,7 +279,7 @@ def weekly_reports():
         note = request.form.get("note", "")
         try:
             archive_weekly_report(start, end, note=note)
-            flash("Weekly report archived.", "success")
+            flash(f"Weekly report for {start.isoformat()} to {end.isoformat()} archived successfully.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
         return redirect(url_for("web.weekly_reports", date=base.isoformat()))
@@ -222,7 +328,7 @@ def admin_attendance_page():
         db.session.add(row)
         db.session.commit()
         flash("Admin attendance saved.", "success")
-        return redirect(url_for("web.admin_attendance_page"))
+        return redirect(url_for("web.dashboard"))
     records = AdminAttendance.query.order_by(AdminAttendance.attendance_date.desc()).limit(30).all()
     return render_template("admin_attendance.html", admins=AdminStaff.query.all(), records=records)
 
@@ -397,27 +503,20 @@ def payments_tracker():
     if request.method == "POST" and request.form.get("action") == "archive":
         month = int(request.form["archive_month"])
         year = int(request.form["archive_year"])
-        count = archive_payments(month=month, year=year)
-        flash(f"Archived {count} payment record(s) for {year}-{month:02d}.", "success")
-        return redirect(url_for("web.payments_tracker", view="active"))
+        try:
+            count = archive_payments(month=month, year=year)
+            label = date(year, month, 1).strftime("%B %Y")
+            flash(f"{label} ledger archived successfully ({count} record(s)).", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("web.payments_tracker", view="archived", month=month, year=year))
 
     today = date.today()
     view = request.args.get("view", "active")
     month = request.args.get("month", type=int) or today.month
     year = request.args.get("year", type=int) or today.year
+    search_query = request.args.get("q", "").strip()
 
-    query = Payment.query
-    if view == "archived":
-        query = query.filter(Payment.is_archived.is_(True))
-        query = query.filter(Payment.archive_month == month, Payment.archive_year == year)
-    else:
-        query = query.filter(Payment.is_archived.is_(False))
-        query = query.filter(
-            Payment.payment_date >= date(year, month, 1),
-            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
-        )
-
-    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
     archived_groups = (
         db.session.query(Payment.archive_year, Payment.archive_month)
         .filter(Payment.is_archived.is_(True))
@@ -425,6 +524,28 @@ def payments_tracker():
         .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
         .all()
     )
+
+    selected_archive = None
+    if view == "archived" and archived_groups:
+        selected_archive = (year, month)
+        if selected_archive not in archived_groups:
+            selected_archive = archived_groups[0]
+            year, month = selected_archive
+
+    query = Payment.query.join(Student)
+    if view == "archived":
+        query = query.filter(Payment.is_archived.is_(True), Payment.archive_month == month, Payment.archive_year == year)
+    else:
+        query = query.filter(Payment.is_archived.is_(False))
+        query = query.filter(
+            Payment.payment_date >= date(year, month, 1),
+            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
+        )
+
+    query = apply_payment_search(query, search_query)
+
+    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
+
     return render_template(
         "payments_tracker.html",
         payments=payments,
@@ -434,6 +555,8 @@ def payments_tracker():
         month=month,
         year=year,
         archived_groups=archived_groups,
+        search_query=search_query,
+        payments_count=len(payments),
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from sqlalchemy import String, cast, or_
 from app.models import (
     AssessmentDepositLedger,
     BillingAdvice,
@@ -155,8 +156,30 @@ def record_payment(
     return payment
 
 
+def apply_payment_search(query, search_query: str):
+    term = (search_query or "").strip()
+    if not term:
+        return query
+
+    like = f"%{term}%"
+    return query.filter(
+        or_(
+            Student.name.ilike(like),
+            Payment.client_guardian_name.ilike(like),
+            Payment.purpose.ilike(like),
+            cast(Payment.billing_period_start, String).ilike(like),
+            cast(Payment.billing_period_end, String).ilike(like),
+        )
+    )
+
+
 def archive_payments(month: int, year: int) -> int:
+    already_archived = Payment.query.filter_by(is_archived=True, archive_month=month, archive_year=year).first()
+    if already_archived:
+        raise ValueError(f"Archive for {year}-{month:02d} already exists.")
+
     payments = Payment.query.filter(
+        Payment.is_archived.is_(False),
         Payment.payment_date >= date(year, month, 1),
         Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
     ).all()
