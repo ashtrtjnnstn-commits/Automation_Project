@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -18,6 +18,7 @@ from app.models import (
     SessionOverride,
     Student,
     Therapist,
+    WeeklyReportArchive,
     db,
 )
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, missed_recovery_summary, weekly_student_hours, weekly_therapist_hours
@@ -385,7 +386,7 @@ def test_weekly_report_archive_creation_and_view(session, client):
 
     res = client.post("/reports/weekly", data={"date": "2026-01-05", "action": "archive_week", "note": "snapshot"}, follow_redirects=True)
     assert res.status_code == 200
-    assert b"Weekly report archived." in res.data
+    assert b"Weekly report for 2026-01-05 to 2026-01-11 archived successfully." in res.data
 
     # locate archive link and open list page
     list_res = client.get("/reports/weekly?date=2026-01-05")
@@ -1454,3 +1455,238 @@ def test_restore_route_restores_selected_backup(app, client, tmp_path):
     assert res.status_code == 200
     assert b"Backup restored." in res.data
     assert db_file.read_text() == "backup-db"
+
+
+class _FixedDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 3, 31)
+
+
+class _SundayDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 1, 4)
+
+
+class _AprilDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 4, 1)
+
+
+class _MondayDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 1, 5)
+
+
+def test_dashboard_upcoming_billings_card_shows_due_and_overdue(session, client):
+    s, _ = setup_basic()
+    cycle_due = generate_billing_cycles_for_range(date(2026, 3, 16), date(2026, 3, 31))[0]
+    advice_due = generate_billing_advices_for_cycle(cycle_due.id, student_id=s.id)[0]
+    advice_due.billing_cycle.due_date = date.today()
+
+    cycle_overdue = generate_billing_cycles_for_range(date(2026, 3, 1), date(2026, 3, 15))[0]
+    advice_overdue = generate_billing_advices_for_cycle(cycle_overdue.id, student_id=s.id)[0]
+    advice_overdue.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.commit()
+
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Upcoming Billings' in res.data
+    assert b'Go to Billing' in res.data
+
+
+def test_monthly_archive_reminder_pending_after_month_end_if_prior_month_missing(session, client, monkeypatch):
+    monkeypatch.setattr('app.routes.web.date', _AprilDate)
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Monthly Ledger Archive' in res.data
+    assert b'Archive for March 2026 is still pending.' in res.data
+
+
+def test_monthly_archive_reminder_completed_after_month_end_when_prior_month_archived(session, client, monkeypatch):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 3, 10), amount=100, is_archived=True, archive_month=3, archive_year=2026))
+    db.session.commit()
+
+    monkeypatch.setattr('app.routes.web.date', _AprilDate)
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Monthly archive is complete for March 2026.' in res.data
+
+
+def test_monthly_archive_duplicate_prevented(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500))
+    db.session.commit()
+
+    first = client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+    second = client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+    assert first.status_code == 200
+    assert b'January 2026 ledger archived successfully (1 record(s)).' in first.data
+    assert b'Archive for 2026-01 already exists.' in second.data
+
+
+def test_archived_ledger_month_year_list_and_open(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 3, 11), amount=100, is_archived=True, archive_month=3, archive_year=2026))
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 2, 8), amount=120, is_archived=True, archive_month=2, archive_year=2026))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=archived')
+    assert res.status_code == 200
+    assert b'Archived Month-Year' in res.data
+    assert b'March 2026' in res.data
+    detail = client.get('/payments/tracker?view=archived&month=2&year=2026')
+    assert b'2026-02-08' in detail.data
+
+
+def test_payment_ledger_search_matches_text_fields(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name='Guardian Match', purpose='Therapy Booster', billing_period_start=date(2026, 1, 1), billing_period_end=date(2026, 1, 15)))
+    db.session.commit()
+
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=S').data
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=guardian').data
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=2026-01-01').data
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=booster').data
+
+
+def test_empty_payment_search_shows_default_listing(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name='A'))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=active&month=1&year=2026&q=')
+    assert res.status_code == 200
+    assert b'2026-01-10' in res.data
+
+
+def test_weekly_archive_reminder_pending_after_sunday_if_week_missing(session, client, monkeypatch):
+    monkeypatch.setattr('app.routes.web.date', _MondayDate)
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Weekly Report Archive' in res.data
+    assert b'Archive for 2025-12-29 to 2026-01-04 is still pending.' in res.data
+
+
+def test_weekly_archive_reminder_completed_after_sunday_when_week_archived(session, client, monkeypatch):
+    monkeypatch.setattr('app.routes.web.date', _MondayDate)
+    db.session.add(WeeklyReportArchive(week_start=date(2025, 12, 29), week_end=date(2026, 1, 4), note='done'))
+    db.session.commit()
+
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'No weekly archive action needed right now.' in res.data
+
+
+def test_navigation_order_and_tabs(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    html = res.data.decode('utf-8')
+    assert html.index('>Dashboard<') < html.index('>Daily Schedule<') < html.index('>Make-up Editor<')
+    assert 'Import' not in html
+    assert 'Admin Attendance</a>' not in html
+
+
+def test_admin_attendance_is_available_in_dashboard(session, client):
+    admin = AdminStaff(name='Dashboard Admin')
+    db.session.add(admin)
+    db.session.commit()
+
+    res = client.post('/', data={
+        'action': 'save_admin_attendance',
+        'admin_id': str(admin.id),
+        'attendance_date': '2026-01-10',
+        'status': 'Present',
+        'shift_label': 'AM',
+        'hours_worked': '4',
+    }, follow_redirects=True)
+    assert res.status_code == 200
+    assert b'Admin attendance saved.' in res.data
+    assert b'Admin Attendance (Dashboard)' in res.data
+
+
+def test_dashboard_renders_grouped_sections_and_priority_open(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    html = res.data.decode('utf-8')
+    assert 'Priority Today' in html
+    assert 'Daily Operations' in html
+    assert 'System / Utilities' in html
+    assert '<details class="dashboard-group" id="priority-today" open>' in html
+
+
+def test_dashboard_lower_priority_sections_collapsible(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    html = res.data.decode('utf-8')
+    assert html.count('<details class="dashboard-group"') >= 3
+
+
+def test_dashboard_renders_today_priorities_summary_strip(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b"Today's priorities:" in res.data
+
+
+def test_dashboard_action_cards_show_status_and_primary_links(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Status:' in res.data
+    assert b'Go to Billing' in res.data
+    assert b'Go to Archive' in res.data
+    assert b'Go to Weekly Archive' in res.data
+
+
+def test_dashboard_empty_states_and_standardized_status_labels(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'No billing tasks need action today.' in res.data
+    assert b'Status: No action needed' in res.data
+
+
+def test_dashboard_shows_last_completed_archive_context_or_fallback(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Last completed: No archive recorded yet.' in res.data
+
+
+def test_dashboard_quick_links_block_renders_expected_destinations(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Quick Links' in res.data
+    assert b'Daily Schedule' in res.data
+    assert b'Make-up Editor' in res.data
+    assert b'Billing' in res.data
+    assert b'Payment Ledger' in res.data
+
+
+def test_payment_ledger_search_ui_shows_summary_and_clear_link(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name='Search Person'))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=active&month=1&year=2026&q=Search')
+    assert res.status_code == 200
+    assert b'Showing 1 matching payment entry for "Search".' in res.data
+    assert b'Clear search' in res.data
+
+
+def test_admin_attendance_save_message_is_specific(session, client):
+    admin = AdminStaff(name='Message Admin')
+    db.session.add(admin)
+    db.session.commit()
+
+    res = client.post('/', data={
+        'action': 'save_admin_attendance',
+        'admin_id': str(admin.id),
+        'attendance_date': '2026-01-10',
+        'status': 'Present',
+        'shift_label': 'AM',
+        'hours_worked': '4',
+    }, follow_redirects=True)
+    assert res.status_code == 200
+    assert b'Admin attendance saved.' in res.data
