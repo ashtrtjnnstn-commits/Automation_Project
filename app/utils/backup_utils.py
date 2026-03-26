@@ -11,14 +11,46 @@ from app.utils.audit_utils import log_audit
 logger = logging.getLogger(__name__)
 
 
+def project_root_path() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
 def resolve_sqlite_db_path(database_uri: str) -> Path:
     if not database_uri.startswith("sqlite:///"):
         raise ValueError("Restore is only supported for sqlite file databases.")
 
     db_path = Path(database_uri.replace("sqlite:///", "", 1))
+    if str(db_path) == ":memory:":
+        raise ValueError("In-memory sqlite database does not have a filesystem path.")
     if not db_path.is_absolute():
-        db_path = Path.cwd() / db_path
+        db_path = project_root_path() / db_path
     return db_path
+
+
+def normalize_sqlite_file_uri(database_uri: str) -> str:
+    db_path = resolve_sqlite_db_path(database_uri)
+    return f"sqlite:///{db_path}"
+
+
+def official_live_sqlite_path() -> Path:
+    return project_root_path() / "data" / "app.db"
+
+
+def legacy_instance_sqlite_path() -> Path:
+    return project_root_path() / "instance" / "data" / "app.db"
+
+
+def migrate_legacy_instance_database_if_needed(database_uri: str) -> tuple[Path, bool]:
+    target = resolve_sqlite_db_path(database_uri)
+    official = official_live_sqlite_path()
+    legacy = legacy_instance_sqlite_path()
+    migrated = False
+    if target == official and not target.exists() and legacy.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, target)
+        migrated = True
+        logger.info("Migrated legacy sqlite DB from %s to %s", legacy, target)
+    return target, migrated
 
 
 def validate_backup_filename(filename: str) -> None:
@@ -32,7 +64,10 @@ def backup_directory_for_database(database_uri: str) -> Path:
 
 
 def list_sqlite_backups(database_uri: str) -> list[Path]:
-    backup_dir = backup_directory_for_database(database_uri)
+    try:
+        backup_dir = backup_directory_for_database(database_uri)
+    except ValueError:
+        return []
     if not backup_dir.exists():
         return []
     return sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)

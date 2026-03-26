@@ -35,7 +35,12 @@ from app.services.import_export_service import (
     export_required_deposit_payment_history,
 )
 from app.services.payment_service import record_payment
-from app.utils.backup_utils import backup_sqlite_database, list_sqlite_backups, restore_sqlite_backup
+from app.utils.backup_utils import (
+    backup_sqlite_database,
+    list_sqlite_backups,
+    resolve_sqlite_db_path,
+    restore_sqlite_backup,
+)
 
 
 def setup_basic():
@@ -1671,6 +1676,32 @@ def test_backup_retention_keeps_latest_seven(tmp_path):
     assert len(list(backup_dir.glob("app_*.db"))) == 7
 
 
+def test_backup_creation_with_official_relative_uri_uses_data_backups(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    live_db = tmp_path / "data" / "app.db"
+    live_db.parent.mkdir(parents=True, exist_ok=True)
+    live_db.write_text("live-db")
+
+    backup = backup_sqlite_database("sqlite:///data/app.db")
+    assert backup is not None
+    assert backup.parent == tmp_path / "data" / "backups"
+    assert backup.name.startswith("app_")
+
+
+def test_backup_listing_with_official_relative_uri_reads_data_backups(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    live_db = tmp_path / "data" / "app.db"
+    backup_dir = tmp_path / "data" / "backups"
+    live_db.parent.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    live_db.write_text("live-db")
+    (backup_dir / "app_20260101_000001.db").write_text("b1")
+
+    listed = list_sqlite_backups("sqlite:///data/app.db")
+    assert listed
+    assert listed[0].parent == backup_dir
+
+
 def test_backup_listing_uses_database_sibling_backups_directory(tmp_path):
     db_file = tmp_path / "nested" / "db" / "app.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1685,14 +1716,45 @@ def test_backup_listing_uses_database_sibling_backups_directory(tmp_path):
     assert listed[0].suffix == ".db"
 
 
+def test_official_sqlite_relative_uri_resolves_to_project_data_app_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    resolved = resolve_sqlite_db_path("sqlite:///data/app.db")
+    assert resolved == tmp_path / "data" / "app.db"
+
+
+def test_legacy_instance_database_migrates_when_official_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    legacy_path = tmp_path / "instance" / "data" / "app.db"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy-db")
+
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    official_path = tmp_path / "data" / "app.db"
+    assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{official_path}"
+    assert official_path.read_text() == "legacy-db"
+
+
+def test_legacy_migration_does_not_overwrite_existing_official_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    legacy_path = tmp_path / "instance" / "data" / "app.db"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy-db")
+    official_path = tmp_path / "data" / "app.db"
+    official_path.parent.mkdir(parents=True, exist_ok=True)
+    official_path.write_text("official-db")
+
+    create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    assert official_path.read_text() == "official-db"
+
+
 def test_sqlite_parent_directory_is_auto_created_when_missing(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
     from app import _ensure_sqlite_parent_directory
     from flask import Flask
 
-    app = Flask(__name__, instance_path=str(tmp_path / "instance"), instance_relative_config=True)
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    app = Flask(__name__, instance_relative_config=True)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///data/app.db"
-    target_dir = Path(app.instance_path) / "data"
+    target_dir = tmp_path / "data"
     assert not target_dir.exists()
     _ensure_sqlite_parent_directory(app)
 
@@ -1700,9 +1762,9 @@ def test_sqlite_parent_directory_is_auto_created_when_missing(tmp_path, monkeypa
 
 
 def test_init_db_no_longer_requires_manual_instance_data_creation(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
     app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
-    target_dir = Path(app.instance_path) / "data"
+    target_dir = tmp_path / "data"
     db_file = target_dir / "app.db"
 
     result = app.test_cli_runner().invoke(args=["init-db"])
@@ -1713,9 +1775,9 @@ def test_init_db_no_longer_requires_manual_instance_data_creation(tmp_path, monk
 
 
 def test_existing_sqlite_parent_directory_remains_safe(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
     seed_app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
-    target_dir = Path(seed_app.instance_path) / "data"
+    target_dir = tmp_path / "data"
     target_dir.mkdir(parents=True, exist_ok=True)
     app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
     result = app.test_cli_runner().invoke(args=["init-db"])
@@ -1725,15 +1787,28 @@ def test_existing_sqlite_parent_directory_remains_safe(tmp_path, monkeypatch):
 
 
 def test_non_sqlite_database_uri_does_not_create_sqlite_directories(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
     from app import _ensure_sqlite_parent_directory
     from flask import Flask
 
-    app = Flask(__name__, instance_path=str(tmp_path / "instance"), instance_relative_config=True)
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    app = Flask(__name__, instance_relative_config=True)
     app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://user:pw@localhost/db"
     _ensure_sqlite_parent_directory(app)
 
-    assert not (tmp_path / "instance" / "data").exists()
+    assert not (tmp_path / "data").exists()
+
+
+def test_system_no_longer_uses_instance_data_as_live_db_after_migration(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    legacy_path = tmp_path / "instance" / "data" / "app.db"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy-db")
+
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    official_path = tmp_path / "data" / "app.db"
+
+    assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{official_path}"
+    assert official_path.exists()
 
 
 def test_editing_issued_billing_advice_is_blocked(session, client):
@@ -1874,6 +1949,21 @@ def test_restore_replaces_database_from_selected_backup(tmp_path):
     assert db_file.read_text() == "backup-db"
 
 
+def test_restore_with_official_relative_uri_targets_data_app_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    live_db = tmp_path / "data" / "app.db"
+    live_db.parent.mkdir(parents=True, exist_ok=True)
+    live_db.write_text("live-db")
+    backup_dir = tmp_path / "data" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_file = backup_dir / "app_20260101_000000.db"
+    backup_file.write_text("backup-db")
+
+    restore_sqlite_backup("sqlite:///data/app.db", backup_file)
+
+    assert live_db.read_text() == "backup-db"
+
+
 def test_restore_route_rejects_invalid_backup_filename(client):
     res = client.post("/restore-backup/not_a_backup.txt", follow_redirects=True)
 
@@ -1961,41 +2051,41 @@ def test_restore_route_handles_filesystem_error_with_restore_specific_message(ap
     assert b"Backup creation failed. Ensure the sqlite database file exists." not in res.data
 
 
-def test_create_backup_route_creates_file_in_instance_data_backups(app, client, tmp_path, monkeypatch):
+def test_create_backup_route_creates_file_in_data_backups(app, client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file = tmp_path / "data" / "app.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
     db_file.write_text("live-db")
 
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
     res = client.post("/create-backup", follow_redirects=True)
 
     assert res.status_code == 200
     assert b"Backup created:" in res.data
-    backups = sorted((tmp_path / "instance" / "data" / "backups").glob("app_*.db"))
+    backups = sorted((tmp_path / "data" / "backups").glob("app_*.db"))
     assert len(backups) == 1
 
 
 def test_dashboard_lists_backups_after_manual_creation(app, client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file = tmp_path / "data" / "app.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
     db_file.write_text("live-db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
 
     client.post("/create-backup", follow_redirects=True)
     page = client.get("/")
-    backup_names = [p.name.encode() for p in (tmp_path / "instance" / "data" / "backups").glob("app_*.db")]
+    backup_names = [p.name.encode() for p in (tmp_path / "data" / "backups").glob("app_*.db")]
     assert backup_names
     assert any(name in page.data for name in backup_names)
 
 
 def test_dashboard_shows_no_backups_only_when_empty(app, client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file = tmp_path / "data" / "app.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
     db_file.write_text("live-db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
 
     page_empty = client.get("/")
     assert b"No backups found." in page_empty.data

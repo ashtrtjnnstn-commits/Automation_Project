@@ -12,17 +12,23 @@ from .routes.web import web_bp
 from .services.attendance_service import generate_monthly_sessions
 from .services.billing_service import generate_billing_cycles_for_range, generate_billing_advices_for_cycle
 from .services.seed_service import seed_sample_data
-from .utils.backup_utils import backup_directory_for_database, backup_sqlite_database, resolve_sqlite_db_path
+from .utils.backup_utils import (
+    backup_directory_for_database,
+    backup_sqlite_database,
+    legacy_instance_sqlite_path,
+    migrate_legacy_instance_database_if_needed,
+    normalize_sqlite_file_uri,
+    official_live_sqlite_path,
+    resolve_sqlite_db_path,
+)
 
 
 def _ensure_sqlite_parent_directory(app: Flask) -> None:
     database_uri = app.config.get("SQLALCHEMY_DATABASE_URI", "")
-    if not database_uri.startswith("sqlite:///"):
+    try:
+        db_path = resolve_sqlite_db_path(database_uri)
+    except ValueError:
         return
-
-    db_path = Path(database_uri.replace("sqlite:///", "", 1))
-    if not db_path.is_absolute():
-        db_path = Path(app.instance_path) / db_path
 
     if db_path.parent.exists():
         app.logger.info("SQLite parent directory already exists: %s", db_path.parent)
@@ -43,6 +49,15 @@ def create_app(test_config: dict | None = None) -> Flask:
     if test_config:
         app.config.update(test_config)
 
+    database_uri = app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    app.logger.info("Configured SQLALCHEMY_DATABASE_URI=%s", database_uri)
+    if database_uri.startswith("sqlite:///"):
+        try:
+            app.config["SQLALCHEMY_DATABASE_URI"] = normalize_sqlite_file_uri(database_uri)
+            app.logger.info("Normalized SQLALCHEMY_DATABASE_URI=%s", app.config["SQLALCHEMY_DATABASE_URI"])
+        except ValueError:
+            app.logger.info("Skipping sqlite file URI normalization for URI=%s", database_uri)
+
     _ensure_sqlite_parent_directory(app)
 
     db.init_app(app)
@@ -52,7 +67,18 @@ def create_app(test_config: dict | None = None) -> Flask:
     with app.app_context():
         database_uri = app.config.get("SQLALCHEMY_DATABASE_URI", "")
         try:
+            official_path = official_live_sqlite_path()
             db_path = resolve_sqlite_db_path(database_uri)
+            legacy_path = legacy_instance_sqlite_path()
+            app.logger.info("Official live sqlite path=%s", official_path)
+            app.logger.info("Legacy sqlite path detected=%s exists=%s", legacy_path, legacy_path.exists())
+            _, migrated = migrate_legacy_instance_database_if_needed(database_uri)
+            if migrated:
+                app.logger.info("Legacy sqlite migration performed to %s", db_path)
+            elif db_path == official_path and official_path.exists() and legacy_path.exists():
+                app.logger.info("Legacy sqlite migration skipped because official DB already exists at %s", official_path)
+            else:
+                app.logger.info("Legacy sqlite migration unnecessary for %s", db_path)
             backup_dir = backup_directory_for_database(database_uri)
             app.logger.info("Startup backup trace db_path=%s backup_dir=%s", db_path, backup_dir)
         except ValueError:
