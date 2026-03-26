@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Archive Refresh Review - {{ ['January','February','March','April','May','June','July','August','September','October','November','December'][month-1] }} {{ year }}</h2>
+<p>Archive status: <strong>{{ 'Outdated' if snapshot.status == 'outdated' else 'Current' }}</strong>. Supervisor approval is required before refresh.</p>
+
+<h3>Before vs After Summary</h3>
+<ul>
+  <li>Old archived total amount: {{ summary.archived_total }}</li>
+  <li>New recalculated total amount: {{ summary.live_total }}</li>
+  <li>Difference/impact: {{ summary.difference }}</li>
+  <li>Old archived entry count: {{ summary.archived_count }}</li>
+  <li>New live entry count: {{ summary.live_count }}</li>
+</ul>
+
+<h3>Current Live Payment Entries</h3>
+<table>
+  <tr><th>Date</th><th>Student</th><th>Guardian</th><th>Purpose</th><th>Amount</th><th>Received By</th></tr>
+  {% for p in live_entries %}
+  <tr>
+    <td>{{ p.payment_date }}</td>
+    <td>{{ p.student.name }}</td>
+    <td>{{ p.client_guardian_name }}</td>
+    <td>{{ p.purpose }}</td>
+    <td>{{ p.amount }}</td>
+    <td>{{ p.received_by_admin.name if p.received_by_admin else '-' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6">No payment entries for this month.</td></tr>
+  {% endfor %}
+</table>
+
+<h3>Supervisor Approval</h3>
+<form method="post" class="inline-form">
+  <label>Supervisor
+    <select name="supervisor_name" required>
+      {% for s in supervisors %}
+      <option value="{{ s.name }}">{{ s.name }} ({{ s.role }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Password <input type="password" name="supervisor_password" required /></label>
+  <label>Refresh Reason <input type="text" name="refresh_reason" required /></label>
+  <button>Approve and Refresh</button>
+</form>
+{% endblock %}

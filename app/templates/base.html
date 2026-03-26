@@ -11,16 +11,14 @@
   <h1>Therapy Center Operations</h1>
   <nav>
     <a href="{{ url_for('web.dashboard') }}">Dashboard</a>
-    <a href="{{ url_for('web.attendance_month') }}">Attendance</a>
     <a href="{{ url_for('web.daily_schedule') }}">Daily Schedule</a>
     <a href="{{ url_for('web.makeup_editor') }}">Make-up Editor</a>
-    <a href="{{ url_for('web.admin_attendance_page') }}">Admin Attendance</a>
+    <a href="{{ url_for('web.attendance_month') }}">Attendance</a>
     <a href="{{ url_for('web.billing_page') }}">Billing</a>
     <a href="{{ url_for('web.payments_page') }}">Payments</a>
     <a href="{{ url_for('web.payments_tracker') }}">Payments Tracker</a>
-    <a href="{{ url_for('web.import_page') }}">Import</a>
-    <a href="{{ url_for('web.export_reports_page') }}">Export Reports</a>
     <a href="{{ url_for('web.weekly_reports') }}">Weekly Reports</a>
+    <a href="{{ url_for('web.export_reports_page') }}">Export Reports</a>
     <a href="{{ url_for('web.master_data_index') }}">Master Data</a>
   </nav>
 </header>

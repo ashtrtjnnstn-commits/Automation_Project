@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -11,13 +11,17 @@ from app.models import (
     AttendanceSession,
     AuditLog,
     BillingAdvice,
+    MonthlyPaymentArchive,
     PaymentAllocation,
     Payment,
+    RedBillingNotice,
     RegularSchedule,
     RequiredDepositLedger,
     SessionOverride,
     Student,
+    Supervisor,
     Therapist,
+    WeeklyReportArchive,
     db,
 )
 from app.services.attendance_service import create_makeup_session, generate_monthly_sessions, missed_recovery_summary, weekly_student_hours, weekly_therapist_hours
@@ -29,7 +33,7 @@ from app.services.import_export_service import (
     export_required_deposit_payment_history,
 )
 from app.services.payment_service import record_payment
-from app.utils.backup_utils import backup_sqlite_database
+from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
 
 
 def setup_basic():
@@ -385,7 +389,7 @@ def test_weekly_report_archive_creation_and_view(session, client):
 
     res = client.post("/reports/weekly", data={"date": "2026-01-05", "action": "archive_week", "note": "snapshot"}, follow_redirects=True)
     assert res.status_code == 200
-    assert b"Weekly report archived." in res.data
+    assert b"Weekly report for 2026-01-05 to 2026-01-11 archived successfully." in res.data
 
     # locate archive link and open list page
     list_res = client.get("/reports/weekly?date=2026-01-05")
@@ -1315,7 +1319,7 @@ def test_editing_issued_billing_advice_is_blocked(session, client):
         follow_redirects=True,
     )
     assert res.status_code == 200
-    assert b"locked and cannot be edited" in res.data
+    assert b"Frozen Billing Correction Approval" in res.data
 
 
 def test_deleting_issued_paid_archived_billing_advice_is_blocked(session, client):
@@ -1417,3 +1421,730 @@ def test_audit_logging_failure_does_not_crash_workflow(session, monkeypatch):
     monkeypatch.setattr(payment_service, "log_audit", boom)
     payment = record_payment(s.id, 100, date(2026, 1, 10))
     assert payment.id is not None
+
+
+def test_restore_replaces_database_from_selected_backup(tmp_path):
+    db_file = tmp_path / "app.db"
+    db_file.write_text("live-db")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_file = backup_dir / "app_20260101_000000.db"
+    backup_file.write_text("backup-db")
+
+    restore_sqlite_backup(f"sqlite:///{db_file}", backup_file)
+
+    assert db_file.read_text() == "backup-db"
+
+
+def test_restore_route_rejects_invalid_backup_filename(client):
+    res = client.post("/restore-backup/not_a_backup.txt", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Invalid backup filename." in res.data
+
+
+def test_restore_route_restores_selected_backup(app, client, tmp_path):
+    db_file = tmp_path / "app.db"
+    db_file.write_text("live-db")
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_file = backup_dir / "app_20260101_000000.db"
+    backup_file.write_text("backup-db")
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
+
+    res = client.post(f"/restore-backup/{backup_file.name}", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Backup restored." in res.data
+    assert db_file.read_text() == "backup-db"
+
+
+def test_create_backup_route_creates_file_in_instance_data_backups(app, client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.write_text("live-db")
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+    res = client.post("/create-backup", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Backup created:" in res.data
+    backups = sorted((tmp_path / "instance" / "data" / "backups").glob("app_*.db"))
+    assert len(backups) == 1
+
+
+def test_dashboard_lists_backups_after_manual_creation(app, client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.write_text("live-db")
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+
+    client.post("/create-backup", follow_redirects=True)
+    page = client.get("/")
+    backup_names = [p.name.encode() for p in (tmp_path / "instance" / "data" / "backups").glob("app_*.db")]
+    assert backup_names
+    assert any(name in page.data for name in backup_names)
+
+
+def test_create_backup_route_rejects_non_sqlite_database(app, client):
+    app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://user:pw@localhost/db"
+
+    res = client.post("/create-backup", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Backup is only supported for sqlite file databases." in res.data
+
+
+class _FixedDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 3, 31)
+
+
+class _SundayDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 1, 4)
+
+
+class _AprilDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 4, 1)
+
+
+class _MondayDate(date):
+    @classmethod
+    def today(cls):
+        return cls(2026, 1, 5)
+
+
+def test_dashboard_billings_today_card_shows_students_due_for_generation(session, client):
+    s, _ = setup_basic()
+    s.created_at = datetime.combine(date.today() - timedelta(days=14), datetime.min.time())
+    db.session.commit()
+
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Billings Today' in res.data
+    assert bytes(s.name, 'utf-8') in res.data
+
+
+def test_monthly_archive_reminder_pending_after_month_end_if_prior_month_missing(session, client, monkeypatch):
+    monkeypatch.setattr('app.routes.web.date', _AprilDate)
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Monthly Ledger Archive' in res.data
+    assert b'Archive for March 2026 is still pending.' in res.data
+
+
+def test_monthly_archive_reminder_completed_after_month_end_when_prior_month_archived(session, client, monkeypatch):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 3, 10), amount=100, is_archived=True, archive_month=3, archive_year=2026))
+    db.session.commit()
+
+    monkeypatch.setattr('app.routes.web.date', _AprilDate)
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Monthly archive is complete for March 2026.' in res.data
+
+
+def test_monthly_archive_duplicate_prevented(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500))
+    db.session.commit()
+
+    first = client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+    second = client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+    assert first.status_code == 200
+    assert b'January 2026 ledger archived successfully (1 record(s)).' in first.data
+    assert b'Archive for 2026-01 already exists.' in second.data
+
+
+def test_archived_ledger_month_year_list_and_open(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 3, 11), amount=100, is_archived=True, archive_month=3, archive_year=2026))
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 2, 8), amount=120, is_archived=True, archive_month=2, archive_year=2026))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=archived')
+    assert res.status_code == 200
+    assert b'Archived Month-Year' in res.data
+    assert b'March 2026' in res.data
+    detail = client.get('/payments/tracker?view=archived&month=2&year=2026')
+    assert b'2026-02-08' in detail.data
+
+
+def test_payment_ledger_search_matches_text_fields(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name='Guardian Match', purpose='Therapy Booster', billing_period_start=date(2026, 1, 1), billing_period_end=date(2026, 1, 15)))
+    db.session.commit()
+
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=S').data
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=guardian').data
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=2026-01-01').data
+    assert b'2026-01-10' in client.get('/payments/tracker?view=active&month=1&year=2026&q=booster').data
+
+
+def test_empty_payment_search_shows_default_listing(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name='A'))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=active&month=1&year=2026&q=')
+    assert res.status_code == 200
+    assert b'2026-01-10' in res.data
+
+
+def test_weekly_archive_reminder_pending_after_sunday_if_week_missing(session, client, monkeypatch):
+    monkeypatch.setattr('app.routes.web.date', _MondayDate)
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Weekly Report Archive' in res.data
+    assert b'Archive for 2025-12-29 to 2026-01-04 is still pending.' in res.data
+
+
+def test_weekly_archive_reminder_completed_after_sunday_when_week_archived(session, client, monkeypatch):
+    monkeypatch.setattr('app.routes.web.date', _MondayDate)
+    db.session.add(WeeklyReportArchive(week_start=date(2025, 12, 29), week_end=date(2026, 1, 4), note='done'))
+    db.session.commit()
+
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'No weekly archive action needed right now.' in res.data
+
+
+def test_navigation_order_and_tabs(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    html = res.data.decode('utf-8')
+    assert html.index('>Dashboard<') < html.index('>Daily Schedule<') < html.index('>Make-up Editor<')
+    assert 'Import' not in html
+    assert 'Admin Attendance</a>' not in html
+
+
+def test_admin_attendance_is_available_in_dashboard(session, client):
+    admin = AdminStaff(name='Dashboard Admin')
+    db.session.add(admin)
+    db.session.commit()
+
+    res = client.post('/', data={
+        'action': 'save_admin_attendance',
+        'admin_id': str(admin.id),
+        'attendance_date': '2026-01-10',
+        'status': 'Present',
+        'shift_label': 'AM',
+        'hours_worked': '4',
+    }, follow_redirects=True)
+    assert res.status_code == 200
+    assert b'Admin attendance saved.' in res.data
+    assert b'Admin Attendance (Dashboard)' in res.data
+
+
+def test_dashboard_renders_grouped_sections_and_priority_open(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    html = res.data.decode('utf-8')
+    assert 'Priority Today' in html
+    assert 'Daily Operations' in html
+    assert 'System / Utilities' in html
+    assert '<details class="dashboard-group" id="priority-today" open>' in html
+
+
+def test_dashboard_lower_priority_sections_collapsible(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    html = res.data.decode('utf-8')
+    assert html.count('<details class="dashboard-group"') >= 3
+
+
+def test_dashboard_renders_today_priorities_summary_strip(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b"Today's priorities:" in res.data
+
+
+def test_dashboard_action_cards_show_status_and_primary_links(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Status:' in res.data
+    assert b'Go to Billing' in res.data
+    assert b'Go to Archive' in res.data
+    assert b'Go to Weekly Archive' in res.data
+
+
+def test_dashboard_empty_states_and_standardized_status_labels(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'No billing tasks need action today.' in res.data
+    assert b'Status: No action needed' in res.data
+
+
+def test_dashboard_shows_last_completed_archive_context_or_fallback(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Last completed: No archive recorded yet.' in res.data
+
+
+def test_dashboard_quick_links_block_renders_expected_destinations(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b'Quick Links' in res.data
+    assert b'Daily Schedule' in res.data
+    assert b'Make-up Editor' in res.data
+    assert b'Billing' in res.data
+    assert b'Payment Ledger' in res.data
+
+
+def test_payment_ledger_search_ui_shows_summary_and_clear_link(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=500, client_guardian_name='Search Person'))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=active&month=1&year=2026&q=Search')
+    assert res.status_code == 200
+    assert b'Showing 1 matching payment entry for "Search".' in res.data
+    assert b'Clear search' in res.data
+
+
+def test_admin_attendance_save_message_is_specific(session, client):
+    admin = AdminStaff(name='Message Admin')
+    db.session.add(admin)
+    db.session.commit()
+
+    res = client.post('/', data={
+        'action': 'save_admin_attendance',
+        'admin_id': str(admin.id),
+        'attendance_date': '2026-01-10',
+        'status': 'Present',
+        'shift_label': 'AM',
+        'hours_worked': '4',
+    }, follow_redirects=True)
+    assert res.status_code == 200
+    assert b'Admin attendance saved.' in res.data
+
+
+def test_student_required_deposit_policy_flag_defaults_true(session):
+    s = Student(name="Policy Default", contract_hours_per_week=2)
+    db.session.add(s)
+    db.session.commit()
+
+    assert s.required_deposit_enabled is True
+
+
+def test_student_can_be_marked_no_required_deposit(session, client):
+    res = client.post('/master-data/students', data={
+        'action': 'create',
+        'name': 'No Deposit Student',
+        'contract_hours_per_week': '3',
+        'required_deposit_enabled': '0',
+        'overpayment_credit': '0',
+        'active': '1',
+    }, follow_redirects=True)
+    assert res.status_code == 200
+    student = Student.query.filter_by(name='No Deposit Student').first()
+    assert student is not None
+    assert student.required_deposit_enabled is False
+
+
+def test_billing_skips_required_deposit_when_disabled(session):
+    s, _ = setup_basic()
+    s.required_deposit_enabled = False
+    db.session.commit()
+
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    assert advice.required_deposit_charge == 0
+
+
+def test_required_deposit_ui_shows_policy_options(session, client):
+    res = client.get('/master-data/students')
+    assert res.status_code == 200
+    assert b'With Required Deposit' in res.data
+    assert b'No Required Deposit' in res.data
+
+
+def test_payment_create_in_archived_month_marks_archive_outdated(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 5), amount=100))
+    db.session.commit()
+    client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+
+    client.post('/payments', data={
+        'payment_date': '2026-01-10', 'client_guardian_name': 'A', 'student_id': str(s.id), 'purpose': 'Therapy', 'amount': '50'
+    }, follow_redirects=True)
+
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=1, archive_year=2026).first()
+    assert snapshot is not None
+    assert snapshot.status == 'outdated'
+
+
+def test_payment_edit_in_archived_month_marks_archive_outdated(session, client):
+    s, _ = setup_basic()
+    p = Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100)
+    db.session.add(p)
+    db.session.commit()
+    client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+
+    res = client.post(f'/payments/{p.id}/edit', data={'payment_date': '2026-01-11', 'client_guardian_name': 'X', 'student_id': str(s.id), 'purpose': 'Therapy', 'amount': '200', 'mode_of_transfer': 'Cash'}, follow_redirects=True)
+    assert res.status_code == 200
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=1, archive_year=2026).first()
+    assert snapshot.status == 'outdated'
+
+
+def test_payment_delete_in_archived_month_marks_archive_outdated(session, client):
+    s, _ = setup_basic()
+    p = Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100)
+    db.session.add(p)
+    db.session.commit()
+    client.post('/payments/tracker', data={'action': 'archive', 'archive_month': '1', 'archive_year': '2026'}, follow_redirects=True)
+
+    res = client.post(f'/payments/{p.id}/delete', follow_redirects=True)
+    assert res.status_code == 200
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=1, archive_year=2026).first()
+    assert snapshot.status == 'outdated'
+
+
+def test_archived_list_shows_outdated_status_and_refresh_link(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100, is_archived=True, archive_month=1, archive_year=2026))
+    db.session.add(MonthlyPaymentArchive(archive_month=1, archive_year=2026, status='outdated', archived_total_amount=100, archived_entry_count=1))
+    db.session.commit()
+
+    res = client.get('/payments/tracker?view=archived&month=1&year=2026')
+    assert b'Status: Outdated' in res.data
+    assert b'Refresh Archive' in res.data
+
+
+def test_supervisor_master_create_hashes_password(session, client):
+    res = client.post('/master-data/supervisors', data={'action': 'create', 'name': 'Sup A', 'role': 'Billing Lead', 'password': 'secret123'}, follow_redirects=True)
+    assert res.status_code == 200
+    row = Supervisor.query.filter_by(name='Sup A').first()
+    assert row is not None
+    assert row.password_hash != 'secret123'
+
+
+def test_supervisor_password_not_exposed_in_ui(session, client):
+    client.post('/master-data/supervisors', data={'action': 'create', 'name': 'Sup B', 'role': 'Billing Lead', 'password': 'secret123'}, follow_redirects=True)
+    res = client.get('/master-data/supervisors')
+    assert b'secret123' not in res.data
+
+
+def test_inactive_supervisor_cannot_approve_refresh(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100, is_archived=True, archive_month=1, archive_year=2026))
+    db.session.add(MonthlyPaymentArchive(archive_month=1, archive_year=2026, status='outdated', archived_total_amount=100, archived_entry_count=1))
+    from werkzeug.security import generate_password_hash
+    db.session.add(Supervisor(name='Inactive Sup', role='Admin Supervisor', password_hash=generate_password_hash('pw'), is_active=False))
+    db.session.commit()
+
+    res = client.post('/payments/archive-review/2026/1', data={'supervisor_name': 'Inactive Sup', 'supervisor_password': 'pw', 'refresh_reason': 'test'}, follow_redirects=True)
+    assert b'Supervisor approval failed' in res.data
+
+
+def test_review_page_shows_month_status_and_comparison(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100))
+    db.session.add(MonthlyPaymentArchive(archive_month=1, archive_year=2026, status='outdated', archived_total_amount=80, archived_entry_count=1))
+    db.session.commit()
+
+    res = client.get('/payments/archive-review/2026/1')
+    assert b'Archive Refresh Review - January 2026' in res.data
+    assert b'Archive status: <strong>Outdated</strong>' in res.data
+    assert b'Old archived total amount' in res.data
+    assert b'New recalculated total amount' in res.data
+    assert b'Supervisor Approval' in res.data
+
+
+def test_wrong_supervisor_password_blocks_refresh(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100, is_archived=True, archive_month=1, archive_year=2026))
+    db.session.add(MonthlyPaymentArchive(archive_month=1, archive_year=2026, status='outdated', archived_total_amount=100, archived_entry_count=1))
+    from werkzeug.security import generate_password_hash
+    db.session.add(Supervisor(name='Sup C', role='Admin Supervisor', password_hash=generate_password_hash('goodpw'), is_active=True))
+    db.session.commit()
+
+    res = client.post('/payments/archive-review/2026/1', data={'supervisor_name': 'Sup C', 'supervisor_password': 'badpw', 'refresh_reason': 'fix'}, follow_redirects=True)
+    assert b'Supervisor approval failed' in res.data
+
+
+def test_correct_supervisor_refreshes_archive_and_logs_audit(session, client):
+    s, _ = setup_basic()
+    db.session.add(Payment(student_id=s.id, payment_date=date(2026, 1, 10), amount=100, is_archived=True, archive_month=1, archive_year=2026))
+    db.session.add(MonthlyPaymentArchive(archive_month=1, archive_year=2026, status='outdated', archived_total_amount=50, archived_entry_count=1))
+    from werkzeug.security import generate_password_hash
+    db.session.add(Supervisor(name='Sup D', role='Admin Supervisor', password_hash=generate_password_hash('goodpw'), is_active=True))
+    db.session.commit()
+
+    res = client.post('/payments/archive-review/2026/1', data={'supervisor_name': 'Sup D', 'supervisor_password': 'goodpw', 'refresh_reason': 'month close'}, follow_redirects=True)
+    assert b'January 2026 archive refreshed successfully.' in res.data
+
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=1, archive_year=2026).first()
+    assert snapshot.status == 'current'
+    audit = AuditLog.query.filter_by(action='archive_refresh_approved').first()
+    assert audit is not None
+    assert '2026-01' in audit.details
+
+
+def test_generating_billing_removes_student_from_billings_today(session, client, monkeypatch):
+    s, _ = setup_basic()
+    s.created_at = datetime.combine(date(2026, 1, 1), datetime.min.time())
+    db.session.commit()
+
+    import app.routes.web as web_routes
+    class _BillDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 1, 15)
+    monkeypatch.setattr(web_routes, "date", _BillDate)
+
+    before = client.get('/')
+    assert b'(2026-01-01 to 2026-01-15)' in before.data
+
+    client.post('/billing', data={'student_id': str(s.id), 'start_date': '2026-01-01', 'end_date': '2026-01-15'}, follow_redirects=True)
+    after = client.get('/')
+    assert b'(2026-01-01 to 2026-01-15)' not in after.data
+
+
+def test_upcoming_and_overdue_use_unsettled_generated_billing(session, client):
+    s, _ = setup_basic()
+    c1 = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    a1 = generate_billing_advices_for_cycle(c1.id, student_id=s.id)[0]
+    a1.billing_cycle.due_date = date.today() + timedelta(days=2)
+
+    c2 = generate_billing_cycles_for_range(date(2026, 1, 16), date(2026, 1, 30))[0]
+    a2 = generate_billing_advices_for_cycle(c2.id, student_id=s.id)[0]
+    a2.billing_cycle.due_date = date.today() - timedelta(days=2)
+    db.session.commit()
+
+    res = client.get('/')
+    assert b'Upcoming Dues' in res.data
+    assert b'Overdue' in res.data
+
+
+def test_full_payment_removes_due_overdue_but_partial_does_not(session, client):
+    s, _ = setup_basic()
+    c = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(c.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.commit()
+
+    # partial payment keeps overdue
+    record_payment(s.id, 100, date.today())
+    partial = client.get('/')
+    assert b'Overdue' in partial.data
+
+    # full settlement removes overdue
+    record_payment(s.id, max(advice.total_due, 0), date.today())
+    settled = client.get('/')
+    assert b'No overdue billing advice.' in settled.data
+
+
+def test_frozen_billing_requires_supervisor_approval_for_edit(session, client):
+    s, _ = setup_basic()
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice.status = 'Issued'
+    from werkzeug.security import generate_password_hash
+    db.session.add(Supervisor(name='Bill Sup', role='Billing Lead', password_hash=generate_password_hash('pw'), is_active=True))
+    db.session.commit()
+
+    res = client.get(f'/billing/{advice.id}/edit')
+    assert b'Frozen Billing Correction Approval' in res.data
+
+
+def test_correct_supervisor_allows_frozen_billing_edit_and_logs(session, client):
+    s, _ = setup_basic()
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice.status = 'Issued'
+    from werkzeug.security import generate_password_hash
+    db.session.add(Supervisor(name='Bill Sup2', role='Billing Lead', password_hash=generate_password_hash('pw'), is_active=True))
+    db.session.commit()
+
+    client.post(f'/billing/{advice.id}/approve-frozen-edit', data={'supervisor_name': 'Bill Sup2', 'supervisor_password': 'pw', 'approval_reason': 'client correction'}, follow_redirects=True)
+    res = client.post(f'/billing/{advice.id}/edit', data={
+        'cycle_start': '2026-01-01', 'cycle_end': '2026-01-15', 'issue_date': '2026-01-15', 'due_date': '2026-01-20',
+        'session_subtotal': str(advice.subtotal_sessions), 'required_deposit': str(advice.required_deposit_charge),
+        'assessment_deposit': str(advice.assessment_deposit_charge), 'old_balance': str(advice.old_balance),
+        'credit': str(advice.overpayment_credit), 'total_due': str(advice.total_due), 'status': 'Issued'
+    }, follow_redirects=True)
+    assert b'Billing advice updated.' in res.data
+    audit = AuditLog.query.filter_by(action='frozen_billing_correction_approved').first()
+    assert audit is not None
+
+
+def test_red_bills_to_issue_shows_overdue_unsettled_without_notice(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.add(AttendanceSession(student_id=s.id, therapist_id=s.assigned_therapist_id, session_date=date.today()+timedelta(days=1), start_time=time(9,0), end_time=time(10,0), duration_hours=1, status='Present', source_type='manual'))
+    db.session.commit()
+
+    res = client.get('/')
+    assert b'Red Bills To Issue' in res.data
+    assert b'Red Bill Needed' in res.data
+
+
+def test_issue_red_bill_moves_case_to_active(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.add(AttendanceSession(student_id=s.id, therapist_id=s.assigned_therapist_id, session_date=date.today()+timedelta(days=2), start_time=time(9,0), end_time=time(10,0), duration_hours=1, status='Present', source_type='manual'))
+    db.session.commit()
+
+    client.post(f'/billing/{advice.id}/issue-red-bill', follow_redirects=True)
+    res = client.get('/')
+    assert b'Red Bills Active' in res.data
+
+
+def test_suspension_required_shows_when_red_bill_due_passed(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=10)
+    db.session.add(RedBillingNotice(billing_advice_id=advice.id, student_id=s.id, issued_date=date.today()-timedelta(days=9), outstanding_amount=advice.total_due, next_session_date=date.today()-timedelta(days=1), red_bill_due_date=date.today()-timedelta(days=2), status='issued'))
+    db.session.commit()
+
+    res = client.get('/')
+    assert b'Suspension Required' in res.data
+
+
+def test_red_bill_reminders_removed_when_settled(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.add(RedBillingNotice(billing_advice_id=advice.id, student_id=s.id, issued_date=date.today(), outstanding_amount=advice.total_due, next_session_date=date.today()+timedelta(days=1), red_bill_due_date=date.today(), status='issued'))
+    db.session.commit()
+
+    record_payment(s.id, advice.total_due, date.today())
+    res = client.get('/')
+    assert b'No active Red Bills at this time.' in res.data
+
+
+def test_red_bill_due_date_uses_next_session_strictly_after_today(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.add(AttendanceSession(student_id=s.id, therapist_id=s.assigned_therapist_id, session_date=date.today(), start_time=time(9, 0), end_time=time(10, 0), duration_hours=1, status='Present', source_type='manual'))
+    db.session.add(AttendanceSession(student_id=s.id, therapist_id=s.assigned_therapist_id, session_date=date.today() + timedelta(days=3), start_time=time(9, 0), end_time=time(10, 0), duration_hours=1, status='Present', source_type='manual'))
+    db.session.commit()
+
+    client.post(f'/billing/{advice.id}/issue-red-bill', follow_redirects=True)
+    notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    assert notice.next_session_date == date.today() + timedelta(days=3)
+    assert notice.red_bill_due_date == date.today() + timedelta(days=2)
+
+
+def test_red_bill_no_future_session_is_due_today_immediate(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    db.session.commit()
+
+    res = client.post(f'/billing/{advice.id}/issue-red-bill', follow_redirects=True)
+    assert b'Red Bill due date' in res.data
+    notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    assert notice.next_session_date is None
+    assert notice.red_bill_due_date == date.today()
+
+
+def test_red_bill_schedule_changes_before_but_not_after_issuance(session, client):
+    s, _ = setup_basic()
+    cyc = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cyc.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=1)
+    original = AttendanceSession(student_id=s.id, therapist_id=s.assigned_therapist_id, session_date=date.today() + timedelta(days=4), start_time=time(9, 0), end_time=time(10, 0), duration_hours=1, status='Present', source_type='manual')
+    db.session.add(original)
+    db.session.commit()
+
+    original.session_date = date.today() + timedelta(days=2)
+    db.session.commit()
+    client.post(f'/billing/{advice.id}/issue-red-bill', follow_redirects=True)
+    notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    due_at_issue = notice.red_bill_due_date
+    assert due_at_issue == date.today() + timedelta(days=1)
+
+    original.session_date = date.today() + timedelta(days=8)
+    db.session.commit()
+    refreshed = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    assert refreshed.red_bill_due_date == due_at_issue
+
+
+def test_suspended_student_daily_attendance_is_locked(session, client):
+    s, _ = setup_basic()
+    target_date = date.today()
+    sess = AttendanceSession(
+        student_id=s.id,
+        therapist_id=s.assigned_therapist_id,
+        session_date=target_date,
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="",
+        source_type="manual",
+    )
+    db.session.add(sess)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=10)
+    db.session.add(RedBillingNotice(billing_advice_id=advice.id, student_id=s.id, issued_date=date.today()-timedelta(days=9), outstanding_amount=advice.total_due, next_session_date=date.today()-timedelta(days=1), red_bill_due_date=date.today()-timedelta(days=2), status='issued'))
+    db.session.commit()
+
+    page = client.get(f'/attendance/daily?date={target_date.isoformat()}')
+    assert b'Suspended' in page.data
+
+    client.post('/attendance/daily', data={'selected_date': target_date.isoformat(), 'session_ids': [str(sess.id)], f'status_{sess.id}': 'Present'}, follow_redirects=True)
+    db.session.refresh(sess)
+    assert sess.status == 'Suspended'
+
+
+def test_full_settlement_lifts_suspension_and_partial_needs_exception(session, client):
+    s, _ = setup_basic()
+    target_date = date.today()
+    sess = AttendanceSession(
+        student_id=s.id,
+        therapist_id=s.assigned_therapist_id,
+        session_date=target_date,
+        start_time=time(9, 0),
+        end_time=time(10, 0),
+        duration_hours=1,
+        status="",
+        source_type="manual",
+    )
+    db.session.add(sess)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    advice.billing_cycle.due_date = date.today() - timedelta(days=10)
+    db.session.add(RedBillingNotice(billing_advice_id=advice.id, student_id=s.id, issued_date=date.today()-timedelta(days=9), outstanding_amount=advice.total_due, next_session_date=date.today()-timedelta(days=1), red_bill_due_date=date.today()-timedelta(days=2), status='issued'))
+    from werkzeug.security import generate_password_hash
+    db.session.add(Supervisor(name='Ops Sup', role='Ops', password_hash=generate_password_hash('pw'), is_active=True))
+    db.session.commit()
+
+    record_payment(s.id, 100, date.today())
+    client.post('/attendance/daily', data={'selected_date': target_date.isoformat(), 'session_ids': [str(sess.id)], f'status_{sess.id}': 'Present'}, follow_redirects=True)
+    db.session.refresh(sess)
+    assert sess.status == 'Suspended'
+
+    client.post(f'/billing/{advice.id}/suspension-exception', data={'supervisor_name': 'Ops Sup', 'supervisor_password': 'pw', 'override_reason': 'Allow return'}, follow_redirects=True)
+    client.post('/attendance/daily', data={'selected_date': target_date.isoformat(), 'session_ids': [str(sess.id)], f'status_{sess.id}': 'Present'}, follow_redirects=True)
+    db.session.refresh(sess)
+    assert sess.status == 'Present'
+    audit = AuditLog.query.filter_by(action='suspension_partial_settlement_lift_approved').first()
+    assert audit is not None
+
+    record_payment(s.id, advice.total_due, date.today())
+    client.post('/attendance/daily', data={'selected_date': target_date.isoformat(), 'session_ids': [str(sess.id)], f'status_{sess.id}': 'Absent'}, follow_redirects=True)
+    db.session.refresh(sess)
+    assert sess.status == 'Absent'

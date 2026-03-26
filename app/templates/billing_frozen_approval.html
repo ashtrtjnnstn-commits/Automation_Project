@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Frozen Billing Correction Approval</h2>
+<p>Billing advice #{{ advice.id }} is frozen and cannot be edited without supervisor approval.</p>
+<form method="post" action="{{ url_for('web.approve_frozen_billing_edit', advice_id=advice.id) }}" class="inline-form">
+  <label>Supervisor
+    <select name="supervisor_name" required>
+      {% for s in supervisors %}
+      <option value="{{ s.name }}">{{ s.name }} ({{ s.role }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Password <input type="password" name="supervisor_password" required /></label>
+  <label>Reason <input type="text" name="approval_reason" required /></label>
+  <button>Approve Correction</button>
+</form>
+<p><a href="{{ url_for('web.billing_page', student_id=advice.student_id) }}">Back to Billing</a></p>
+{% endblock %}
