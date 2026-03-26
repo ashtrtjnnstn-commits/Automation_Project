@@ -29,10 +29,12 @@ from app.models import (
 from app.services.admin_service import admin_hours_summary
 from app.services.attendance_service import (
     missed_recovery_summary,
+    preview_future_generated_sessions_sync,
     RENDERED_STATUSES,
     create_makeup_session,
     generate_monthly_sessions,
     get_month_sessions,
+    sync_future_generated_sessions_for_schedule_change,
     update_session_status,
     weekly_student_hours,
     weekly_therapist_hours,
@@ -407,6 +409,11 @@ def makeup_editor():
 
 @web_bp.route("/reports/weekly", methods=["GET", "POST"])
 def weekly_reports():
+    return reports_page()
+
+
+@web_bp.route("/reports", methods=["GET", "POST"])
+def reports_page():
     base = datetime.strptime(request.values.get("date", date.today().isoformat()), "%Y-%m-%d").date()
     start, end = week_bounds(base)
 
@@ -423,7 +430,7 @@ def weekly_reports():
     students = Student.query.all()
     student_hours = weekly_student_hours(start, end)
     return render_template(
-        "weekly_reports.html",
+        "reports.html",
         start=start,
         end=end,
         selected_date=base,
@@ -434,6 +441,7 @@ def weekly_reports():
         therapists={t.id: t for t in Therapist.query.all()},
         admins={a.id: a for a in AdminStaff.query.all()},
         archives=archives,
+        export_students=Student.query.filter_by(active=True).order_by(Student.name).all(),
     )
 
 
@@ -446,7 +454,7 @@ def weekly_archive_view(archive_id: int):
 
 @web_bp.route("/reports/export")
 def export_reports_page():
-    return render_template("export_reports.html", students=Student.query.filter_by(active=True).order_by(Student.name).all())
+    return redirect(url_for("web.reports_page"))
 
 
 @web_bp.route("/admin-attendance", methods=["GET", "POST"])
@@ -689,8 +697,60 @@ def billing_delete(advice_id: int):
     return redirect(url_for("web.billing_page", student_id=advice.student_id))
 
 
+def _build_payment_history_context(view: str, month: int, year: int, search_query: str) -> dict:
+    archived_groups = (
+        db.session.query(Payment.archive_year, Payment.archive_month)
+        .filter(Payment.is_archived.is_(True))
+        .distinct()
+        .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
+        .all()
+    )
+    archive_status_map = {
+        (a.archive_year, a.archive_month): a.status
+        for a in MonthlyPaymentArchive.query.filter(MonthlyPaymentArchive.archive_year.isnot(None)).all()
+    }
+
+    if view == "archived" and archived_groups and (year, month) not in archived_groups:
+        year, month = archived_groups[0]
+
+    query = Payment.query.join(Student)
+    if view == "archived":
+        query = query.filter(Payment.is_archived.is_(True), Payment.archive_month == month, Payment.archive_year == year)
+    else:
+        query = query.filter(Payment.is_archived.is_(False))
+        query = query.filter(
+            Payment.payment_date >= date(year, month, 1),
+            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
+        )
+
+    query = apply_payment_search(query, search_query)
+    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
+
+    return {
+        "payments": payments,
+        "view": view,
+        "month": month,
+        "year": year,
+        "archived_groups": archived_groups,
+        "search_query": search_query,
+        "payments_count": len(payments),
+        "archive_status_map": archive_status_map,
+    }
+
+
 @web_bp.route("/payments", methods=["GET", "POST"])
 def payments_page():
+    if request.method == "POST" and request.form.get("action") == "archive":
+        month = int(request.form["archive_month"])
+        year = int(request.form["archive_year"])
+        try:
+            count = archive_payments(month=month, year=year)
+            label = date(year, month, 1).strftime("%B %Y")
+            flash(f"{label} ledger archived successfully ({count} record(s)).", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("web.payments_page", view="archived", month=month, year=year))
+
     if request.method == "POST":
         billing_period_start = request.form.get("billing_period_start")
         billing_period_end = request.form.get("billing_period_end")
@@ -716,75 +776,26 @@ def payments_page():
                 f"This payment affects {month_label}, which is already archived. The archive has been marked Outdated and requires supervisor approval to refresh.",
                 "error",
             )
-        return redirect(url_for("web.payments_tracker"))
-    return render_template("payments.html", students=Student.query.all(), admins=AdminStaff.query.filter_by(active=True).all())
-
-
-@web_bp.route("/payments/tracker", methods=["GET", "POST"])
-def payments_tracker():
-    if request.method == "POST" and request.form.get("action") == "archive":
-        month = int(request.form["archive_month"])
-        year = int(request.form["archive_year"])
-        try:
-            count = archive_payments(month=month, year=year)
-            label = date(year, month, 1).strftime("%B %Y")
-            flash(f"{label} ledger archived successfully ({count} record(s)).", "success")
-        except ValueError as exc:
-            flash(str(exc), "error")
-        return redirect(url_for("web.payments_tracker", view="archived", month=month, year=year))
+        return redirect(url_for("web.payments_page"))
 
     today = date.today()
     view = request.args.get("view", "active")
     month = request.args.get("month", type=int) or today.month
     year = request.args.get("year", type=int) or today.year
     search_query = request.args.get("q", "").strip()
-
-    archived_groups = (
-        db.session.query(Payment.archive_year, Payment.archive_month)
-        .filter(Payment.is_archived.is_(True))
-        .distinct()
-        .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
-        .all()
-    )
-    archive_status_map = {
-        (a.archive_year, a.archive_month): a.status
-        for a in MonthlyPaymentArchive.query.filter(MonthlyPaymentArchive.archive_year.isnot(None)).all()
-    }
-
-    selected_archive = None
-    if view == "archived" and archived_groups:
-        selected_archive = (year, month)
-        if selected_archive not in archived_groups:
-            selected_archive = archived_groups[0]
-            year, month = selected_archive
-
-    query = Payment.query.join(Student)
-    if view == "archived":
-        query = query.filter(Payment.is_archived.is_(True), Payment.archive_month == month, Payment.archive_year == year)
-    else:
-        query = query.filter(Payment.is_archived.is_(False))
-        query = query.filter(
-            Payment.payment_date >= date(year, month, 1),
-            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
-        )
-
-    query = apply_payment_search(query, search_query)
-
-    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
+    history_ctx = _build_payment_history_context(view=view, month=month, year=year, search_query=search_query)
 
     return render_template(
-        "payments_tracker.html",
-        payments=payments,
+        "payments.html",
         students=Student.query.order_by(Student.name).all(),
         admins=AdminStaff.query.filter_by(active=True).order_by(AdminStaff.name).all(),
-        view=view,
-        month=month,
-        year=year,
-        archived_groups=archived_groups,
-        search_query=search_query,
-        payments_count=len(payments),
-        archive_status_map=archive_status_map,
+        **history_ctx,
     )
+
+
+@web_bp.route("/payments/tracker", methods=["GET", "POST"])
+def payments_tracker():
+    return payments_page()
 
 
 @web_bp.route("/payments/<int:payment_id>/edit", methods=["GET", "POST"])
@@ -1003,6 +1014,10 @@ def master_admins():
 @web_bp.route("/master-data/schedules", methods=["GET", "POST"])
 def master_schedules():
     if request.method == "POST":
+        if request.form.get("sync_cancel") == "1":
+            flash("Schedule sync preview canceled. No attendance changes were applied.", "success")
+            return redirect(url_for("web.master_schedules"))
+
         action = request.form.get("action", "create")
         student_id = request.form.get("student_id", type=int)
         therapist_id = request.form.get("therapist_id", type=int)
@@ -1049,6 +1064,53 @@ def master_schedules():
             db.session.add(sched)
         else:
             sched = RegularSchedule.query.get_or_404(int(request.form["schedule_id"]))
+            old_day_of_week = sched.day_of_week
+            old_start_time = sched.start_time
+            old_therapist_id = sched.therapist_id
+            apply_future_sync = request.form.get("apply_future_sync", "1") == "1"
+            effective_from_raw = request.form.get("effective_from", "")
+            sync_confirmed = request.form.get("sync_confirmed", "0") == "1"
+            if apply_future_sync and not sync_confirmed:
+                try:
+                    effective_from = datetime.strptime(effective_from_raw, "%Y-%m-%d").date() if effective_from_raw else date.today()
+                except ValueError:
+                    flash("Effective date is invalid.", "error")
+                    return redirect(url_for("web.master_schedules"))
+
+                preview = preview_future_generated_sessions_sync(
+                    schedule=sched,
+                    proposed_day_of_week=day_of_week,
+                    proposed_start_time=start_time_obj,
+                    proposed_therapist_id=therapist_id,
+                    proposed_duration_hours=duration_hours,
+                    proposed_end_time=end_time_obj,
+                    proposed_active=request.form.get("active", "1") == "1",
+                    previous_day_of_week=old_day_of_week,
+                    previous_start_time=old_start_time,
+                    previous_therapist_id=old_therapist_id,
+                    effective_from=effective_from,
+                )
+                return render_template(
+                    "master_schedules.html",
+                    schedules=RegularSchedule.query.order_by(RegularSchedule.day_of_week, RegularSchedule.start_time).all(),
+                    students=Student.query.order_by(Student.name).all(),
+                    therapists=Therapist.query.order_by(Therapist.name).all(),
+                    active_students=Student.query.filter_by(active=True).order_by(Student.name).all(),
+                    active_therapists=Therapist.query.filter_by(active=True).order_by(Therapist.name).all(),
+                    sync_preview={
+                        "schedule_id": sched.id,
+                        "student_id": student_id,
+                        "therapist_id": therapist_id,
+                        "day_of_week": day_of_week,
+                        "start_time": start_raw,
+                        "end_time": end_raw,
+                        "active": request.form.get("active", "1"),
+                        "effective_from": effective_from.isoformat(),
+                        "counts": preview,
+                        "is_past_or_today": effective_from <= date.today(),
+                    },
+                )
+
             sched.student_id = student_id
             sched.therapist_id = therapist_id
             sched.day_of_week = day_of_week
@@ -1057,8 +1119,23 @@ def master_schedules():
             sched.duration_hours = duration_hours
             sched.active = request.form.get("active", "1") == "1"
 
+            if apply_future_sync:
+                effective_from = datetime.strptime(effective_from_raw, "%Y-%m-%d").date() if effective_from_raw else date.today()
+                removed, added = sync_future_generated_sessions_for_schedule_change(
+                    schedule=sched,
+                    previous_day_of_week=old_day_of_week,
+                    previous_start_time=old_start_time,
+                    previous_therapist_id=old_therapist_id,
+                    effective_from=effective_from,
+                )
+                flash("Schedule updated successfully.", "success")
+                flash(f"{removed} outdated future sessions removed.", "success")
+                flash(f"{added} new future sessions added.", "success")
+                flash("Recorded attendance and overrides were preserved.", "success")
+
         db.session.commit()
-        flash("Regular schedule saved.", "success")
+        if action == "create" or request.form.get("apply_future_sync", "1") != "1":
+            flash("Regular schedule saved.", "success")
         return redirect(url_for("web.master_schedules"))
 
     return render_template(

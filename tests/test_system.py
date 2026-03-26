@@ -382,6 +382,314 @@ def test_master_data_schedule_validation_end_time(session, client):
     assert b"End time must be after start time." in response.data
 
 
+def _setup_generated_schedule_sync_case():
+    s, t = setup_basic()
+    sched = RegularSchedule.query.filter_by(student_id=s.id).first()
+    generate_monthly_sessions(2026, 3)
+    return s, t, sched
+
+
+def test_schedule_sync_keeps_past_generated_attendance_unchanged(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    past = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 16), source_type="generated").first()
+    assert past is not None
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    unchanged = AttendanceSession.query.get(past.id)
+    assert unchanged is not None
+    assert unchanged.start_time == time(9, 0)
+
+
+def test_schedule_sync_updates_future_blank_generated_from_effective_date(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    removed_old = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+    added_new = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first()
+    assert removed_old is None
+    assert added_new is not None
+
+
+def test_schedule_sync_preserves_recorded_future_attendance(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    recorded = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 23), start_time=time(9, 0), source_type="generated").first()
+    recorded.status = "Present"
+    db.session.commit()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    still_recorded = AttendanceSession.query.get(recorded.id)
+    assert still_recorded is not None
+    assert still_recorded.status == "Present"
+
+
+def test_schedule_sync_preserves_manual_overrides(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    manual = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 3, 24),
+        start_time=time(10, 0),
+        end_time=time(11, 0),
+        duration_hours=1,
+        session_type="makeup",
+        source_type="manual",
+        status="",
+    )
+    db.session.add(manual)
+    db.session.commit()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    kept_manual = AttendanceSession.query.get(manual.id)
+    generated_same_slot = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first()
+    assert kept_manual is not None
+    assert kept_manual.source_type == "manual"
+    assert generated_same_slot is None
+
+
+def test_schedule_sync_removes_old_future_blank_dates_and_adds_new_safe_dates(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    old_blank = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+    assert old_blank is not None
+
+    res = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    assert b"Apply this permanent schedule change to future unmarked generated attendance from the effective date onward." in res.data
+    assert AttendanceSession.query.get(old_blank.id) is None
+    assert AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first() is not None
+
+
+def test_schedule_sync_preview_step_appears_with_counts(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    recorded = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 23), source_type="generated").first()
+    recorded.status = "Present"
+    original_for_override = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), source_type="generated").first()
+    manual = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 3, 30),
+        start_time=time(11, 0),
+        end_time=time(12, 0),
+        duration_hours=1,
+        session_type="makeup",
+        source_type="manual",
+        status="",
+    )
+    db.session.add(manual)
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=original_for_override.id, new_session_id=manual.id, override_type="makeup"))
+    db.session.commit()
+
+    preview = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    assert b"Schedule Sync Preview" in preview.data
+    assert b"future blank generated session(s) will be removed" in preview.data
+    assert b"new future generated session(s) will be added" in preview.data
+    assert b"recorded session(s) will be preserved" in preview.data
+    assert b"override-related session(s) will be preserved" in preview.data
+
+
+def test_cancel_schedule_sync_preview_does_not_apply_changes(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    old_blank = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    cancel = client.post("/master-data/schedules", data={"sync_cancel": "1"}, follow_redirects=True)
+    assert b"No attendance changes were applied." in cancel.data
+    assert AttendanceSession.query.get(old_blank.id) is not None
+    assert AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first() is None
+
+
+def test_confirm_schedule_sync_preview_applies_and_shows_human_feedback(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    old_blank = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    confirmed = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "sync_confirmed": "1",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    assert b"Schedule updated successfully." in confirmed.data
+    assert b"outdated future sessions removed." in confirmed.data
+    assert b"new future sessions added." in confirmed.data
+    assert b"Recorded attendance and overrides were preserved." in confirmed.data
+    assert AttendanceSession.query.get(old_blank.id) is None
+    assert AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first() is not None
+
+
+def test_schedule_sync_ui_helper_texts_and_default_on_render(session, client):
+    setup_basic()
+    page = client.get("/master-data/schedules")
+    assert b"Changes will apply only to future unmarked sessions starting this date." in page.data
+    assert b"This will not change past or recorded attendance." in page.data
+    assert b'<option value=\"1\" selected>Yes</option>' in page.data
+
+
+def test_schedule_sync_preview_shows_past_date_warning(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    preview = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-01-01",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+    assert b"Past dates will not be modified. Only future unmarked sessions will be affected." in preview.data
+
+
 def test_weekly_report_archive_creation_and_view(session, client):
     s, _ = setup_basic()
     generate_monthly_sessions(2026, 1)
@@ -1622,8 +1930,69 @@ def test_navigation_order_and_tabs(session, client):
     assert res.status_code == 200
     html = res.data.decode('utf-8')
     assert html.index('>Dashboard<') < html.index('>Daily Schedule<') < html.index('>Make-up Editor<')
+    assert '>Payment<' in html
+    assert '>Reports<' in html
+    assert '>Payments Tracker<' not in html
+    assert '>Weekly Reports<' not in html
+    assert '>Export Reports<' not in html
     assert 'Import' not in html
     assert 'Admin Attendance</a>' not in html
+
+
+def test_branding_uses_skinnerbox_name(session, client):
+    res = client.get('/')
+    assert res.status_code == 200
+    assert b"SkinnerBox Children's Center" in res.data
+
+
+def test_payment_page_renders_consolidated_header_and_sections(session, client):
+    res = client.get('/payments')
+    assert res.status_code == 200
+    assert b"Record a payment and track payment history" in res.data
+    assert b"Record Payment" in res.data
+    assert b"Payment History" in res.data
+
+
+def test_payment_page_preserves_record_search_and_edit_access(session, client):
+    s, _ = setup_basic()
+    admin = AdminStaff(name="P Admin")
+    db.session.add(admin)
+    db.session.commit()
+
+    post_res = client.post(
+        "/payments",
+        data={
+            "action": "record_payment",
+            "payment_date": "2026-01-10",
+            "client_guardian_name": "Consolidated Guardian",
+            "student_id": str(s.id),
+            "purpose": "Therapy",
+            "billing_period_start": "2026-01-01",
+            "billing_period_end": "2026-01-15",
+            "total_hours_rendered": "2",
+            "amount": "500",
+            "received_by_admin_id": str(admin.id),
+            "mode_of_transfer": "Cash",
+        },
+        follow_redirects=True,
+    )
+    assert post_res.status_code == 200
+    assert b"Payment recorded" in post_res.data
+
+    list_res = client.get("/payments?view=active&month=1&year=2026&q=Consolidated")
+    assert b"Consolidated Guardian" in list_res.data
+    assert b"Edit" in list_res.data
+
+
+def test_reports_page_renders_consolidated_sections_and_preserves_features(session, client):
+    setup_basic()
+    res = client.get('/reports?date=2026-01-05')
+    assert res.status_code == 200
+    assert b"Generate and export reports" in res.data
+    assert b"Weekly Reports" in res.data
+    assert b"Export Reports" in res.data
+    assert b"Archive This Week" in res.data
+    assert b"Attendance Summary" in res.data
 
 
 def test_admin_attendance_is_available_in_dashboard(session, client):
@@ -1696,7 +2065,7 @@ def test_dashboard_quick_links_block_renders_expected_destinations(session, clie
     assert b'Daily Schedule' in res.data
     assert b'Make-up Editor' in res.data
     assert b'Billing' in res.data
-    assert b'Payment Ledger' in res.data
+    assert b'Payment' in res.data
 
 
 def test_payment_ledger_search_ui_shows_summary_and_clear_link(session, client):

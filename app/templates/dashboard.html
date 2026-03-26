@@ -196,7 +196,7 @@
     <a href="{{ url_for('web.daily_schedule') }}">Daily Schedule</a>
     <a href="{{ url_for('web.makeup_editor') }}">Make-up Editor</a>
     <a href="{{ url_for('web.billing_page') }}">Billing</a>
-    <a href="{{ url_for('web.payments_tracker') }}">Payment Ledger</a>
+    <a href="{{ url_for('web.payments_page') }}">Payment</a>
   </p>
 
   <h3>Outstanding Make-up Obligations</h3>
@@ -243,6 +243,6 @@
     {% endfor %}
   </table>
 
-  <p><a href="{{ url_for('web.export_reports_page') }}">Go to Export Reports</a></p>
+  <p><a href="{{ url_for('web.reports_page') }}">Go to Reports</a></p>
 </details>
 {% endblock %}
