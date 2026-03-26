@@ -37,7 +37,13 @@
 <h3>Archived Month-Year</h3>
 <ul>
   {% for y, m in archived_groups %}
-  <li><a href="{{ url_for('web.payments_tracker', view='archived', month=m, year=y, q=search_query) }}">{{ ['January','February','March','April','May','June','July','August','September','October','November','December'][m-1] }} {{ y }}</a></li>
+  <li>
+    <a href="{{ url_for('web.payments_tracker', view='archived', month=m, year=y, q=search_query) }}">{{ ['January','February','March','April','May','June','July','August','September','October','November','December'][m-1] }} {{ y }}</a>
+    <span class="status-label">Status: {{ 'Outdated' if archive_status_map.get((y, m)) == 'outdated' else 'current / up-to-date' }}</span>
+    {% if archive_status_map.get((y, m)) == 'outdated' %}
+      <a href="{{ url_for('web.payment_archive_review', year=y, month=m) }}">Refresh Archive</a>
+    {% endif %}
+  </li>
   {% endfor %}
 </ul>
 {% endif %}
@@ -76,7 +82,7 @@
     <td>{{ p.overpayment_amount }}</td>
     <td>{{ p.balance_after_payment }}</td>
     <td>{{ p.mode_of_transfer }}</td>
-    <td><a href="{{ url_for('web.edit_payment', payment_id=p.id) }}">Edit</a></td>
+    <td><a href="{{ url_for('web.edit_payment', payment_id=p.id) }}">Edit</a> | <form method="post" action="{{ url_for('web.delete_payment', payment_id=p.id) }}" style="display:inline"><button type="submit" onclick="return confirm('Delete this payment entry?');">Delete</button></form></td>
   </tr>
   {% else %}
   <tr><td colspan="12">No payment records.</td></tr>

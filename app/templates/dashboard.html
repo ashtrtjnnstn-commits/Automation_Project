@@ -1,10 +1,15 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Dashboard - {{ today }}</h2>
+{% if suspension_required or red_bills_to_issue %}
+<div class="critical-alert-strip">
+  Critical: {{ suspension_required|length }} suspension case(s) and {{ red_bills_to_issue|length }} red bill(s) pending issuance.
+</div>
+{% endif %}
 
 <div class="summary-strip">
   <a href="#priority-today">Today's priorities: {{ pending_tasks_count }}</a>
-  <a href="#billing-card">Overdue billings: {{ overdue_count }}</a>
+  <a href="#billing-card">Overdue: {{ overdue_dues|length }}</a>
   <span>Monthly archive: {{ 'Done' if monthly_archive_done else 'Pending' }}</span>
   <span>Weekly archive: {{ 'Done' if weekly_archive_done else 'Pending' }}</span>
 </div>
@@ -12,14 +17,14 @@
 <details class="dashboard-group" id="priority-today" open>
   <summary><strong>Priority Today</strong></summary>
   <div class="cards">
-    <section id="billing-card" class="action-card {{ 'pending' if overdue_count > 0 else ('attention' if due.due_today|length > 0 else 'done') }}">
-      <h3>Upcoming Billings</h3>
-      <p>Review due and overdue billings, then continue to billing generation.</p>
-      {% if due.overdue or due.due_today %}
-      <p><span class="status-label">Status: {{ 'Overdue' if due.overdue else 'Pending' }}</span></p>
+    <section id="billing-card" class="action-card {{ 'pending' if overdue_dues else ('attention' if billings_today or upcoming_dues else 'done') }}">
+      <h3>Billings Today</h3>
+      <p>Generate billing advice for students whose cycle closes today.</p>
+      {% if billings_today %}
+      <p><span class="status-label">Status: Pending</span></p>
       <ul>
-        {% for a in (due.overdue + due.due_today)[:5] %}
-        <li>{{ a.student.name }} - {{ a.total_due }}</li>
+        {% for item in billings_today[:5] %}
+        <li>{{ item.student.name }} ({{ item.cycle_start }} to {{ item.cycle_end }})</li>
         {% endfor %}
       </ul>
       {% else %}
@@ -27,6 +32,88 @@
       <p>No billing tasks need action today.</p>
       {% endif %}
       <p><a class="primary-action" href="{{ url_for('web.billing_page') }}">Go to Billing</a></p>
+    </section>
+
+
+    <section class="action-card {{ 'attention' if upcoming_dues else 'done' }}">
+      <h3>Upcoming Dues</h3>
+      <p>Generated billing advice due within 3 days and still unsettled.</p>
+      {% if upcoming_dues %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <ul>{% for a in upcoming_dues[:5] %}<li>{{ a.student.name }} - Due {{ a.billing_cycle.due_date }} - Balance {{ a.total_due }} (Due in {{ (a.billing_cycle.due_date - today).days }} day(s))</li>{% endfor %}</ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No upcoming dues need action right now.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card {{ 'pending' if overdue_dues else 'done' }}">
+      <h3>Overdue</h3>
+      <p>Generated billing advice past due and still unsettled.</p>
+      {% if overdue_dues %}
+      <p><span class="status-label">Status: Overdue</span></p>
+      <ul>{% for a in overdue_dues[:5] %}<li>{{ a.student.name }} - Due {{ a.billing_cycle.due_date }} - Balance {{ a.total_due }} (Past due by {{ (today - a.billing_cycle.due_date).days }} day(s))</li>{% endfor %}</ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No overdue billing advice.</p>
+      {% endif %}
+    </section>
+
+
+    <section class="action-card pending red-alert">
+      <h3>Red Bills To Issue</h3>
+      <p>Overdue and unsettled billing advice requiring Red Bill issuance.</p>
+      {% if red_bills_to_issue %}
+      <p><span class="status-label">Status: Red Bill Needed</span></p>
+      <ul>
+        {% for item in red_bills_to_issue %}
+        <li>{{ item.advice.student.name }} | {{ item.advice.billing_cycle.start_date }} to {{ item.advice.billing_cycle.end_date }} | Outstanding {{ item.advice.total_due }} | Next Session {{ item.next_session_date or 'N/A' }} | Red Bill Due {{ item.red_bill_due_date }} {% if item.immediate %}<span class="status-pill suspended">Immediate Action Required</span>{% endif %}</li>
+        <form method="post" action="{{ url_for('web.issue_red_bill', advice_id=item.advice.id) }}"><button type="submit">Issue Red Bill</button></form>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No Red Bills need issuance right now.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card attention red-alert">
+      <h3>Red Bills Active</h3>
+      <p>Red Bills issued and awaiting settlement before suspension threshold.</p>
+      {% if red_bills_active %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <ul>{% for item in red_bills_active %}<li>{{ item.advice.student.name }} | Outstanding {{ item.advice.total_due }} | Next Session {{ item.notice.next_session_date or 'N/A' }} | Red Bill Due {{ item.notice.red_bill_due_date }} | {% if item.manual_override %}Supervisor Lift Active{% elif item.days_remaining == 0 %}Due Today{% elif item.days_remaining > 0 %}Due in {{ item.days_remaining }} day(s){% else %}Past due by {{ (item.days_remaining * -1) }} day(s){% endif %}</li>{% endfor %}</ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No active Red Bills at this time.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card pending red-alert">
+      <h3>Suspension Required</h3>
+      <p>Red Bill due date passed while billing remains unsettled.</p>
+      {% if suspension_required %}
+      <p><span class="status-label">Status: Suspension Required</span></p>
+      <ul>
+        {% for item in suspension_required %}
+        <li>
+          {{ item.advice.student.name }} | Outstanding {{ item.advice.total_due }} | Next Session {{ item.notice.next_session_date or 'N/A' }} | Red Bill Due {{ item.notice.red_bill_due_date }} | Past due by {{ (today - item.notice.red_bill_due_date).days }} day(s)
+          <form method="post" action="{{ url_for('web.approve_suspension_exception', advice_id=item.advice.id) }}" class="inline-form">
+            <select name="supervisor_name" required>
+              <option value="">Supervisor</option>
+              {% for sup in supervisors %}<option value="{{ sup.name }}">{{ sup.name }}</option>{% endfor %}
+            </select>
+            <input type="password" name="supervisor_password" placeholder="Password" required />
+            <input name="override_reason" placeholder="Reason (optional)" />
+            <button type="submit">Supervisor Lift (Partial)</button>
+          </form>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No suspension action required right now.</p>
+      {% endif %}
     </section>
 
     <section class="action-card {{ 'done' if monthly_archive_done else 'pending' }}">

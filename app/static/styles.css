@@ -32,3 +32,8 @@ th, td { border: 1px solid #e5e7eb; padding: 0.5rem; vertical-align: top; }
 .status-label { display: inline-block; font-size: 0.8rem; font-weight: 600; }
 .primary-action { display: inline-block; background: #1d4ed8; color: #ffffff; padding: 0.3rem 0.6rem; border-radius: 6px; text-decoration: none; }
 .quick-links a { margin-right: 0.5rem; }
+
+.red-alert { background: #fef2f2; }
+.critical-alert-strip { background: #b91c1c; color: #fff; padding: 0.6rem; border-radius: 8px; margin-bottom: 0.75rem; font-weight: 700; }
+.suspended-row td { background: #fee2e2; }
+.status-pill.suspended { background: #b91c1c; color: #fff; border-radius: 999px; padding: 0.2rem 0.5rem; font-size: 0.8rem; font-weight: 700; }
