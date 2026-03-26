@@ -27,6 +27,17 @@ def validate_backup_filename(filename: str) -> None:
         raise ValueError("Invalid backup filename.")
 
 
+def backup_directory_for_database(database_uri: str) -> Path:
+    return resolve_sqlite_db_path(database_uri).parent / "backups"
+
+
+def list_sqlite_backups(database_uri: str) -> list[Path]:
+    backup_dir = backup_directory_for_database(database_uri)
+    if not backup_dir.exists():
+        return []
+    return sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
 def _is_readable_file(path: Path) -> bool:
     return path.exists() and path.is_file() and os.access(path, os.R_OK)
 
@@ -64,18 +75,21 @@ def backup_sqlite_database(database_uri: str, keep: int = 7) -> Path | None:
     """Create timestamped backup for sqlite file DB and prune old backups."""
     try:
         db_path = resolve_sqlite_db_path(database_uri)
+        backup_dir = backup_directory_for_database(database_uri)
 
         if not db_path.exists():
+            logger.warning("Backup skipped because live sqlite DB was not found: %s", db_path)
             return None
 
-        backup_dir = db_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Ensured backup directory exists: %s", backup_dir)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"app_{stamp}.db"
         shutil.copy2(db_path, backup_path)
+        logger.info("Created sqlite backup: %s", backup_path)
 
-        backups = sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+        backups = list_sqlite_backups(database_uri)
         for old in backups[keep:]:
             old.unlink(missing_ok=True)
 

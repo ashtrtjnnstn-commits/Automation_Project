@@ -64,6 +64,7 @@ from app.services.weekly_archive_service import archive_weekly_report, get_archi
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
 from app.utils.backup_utils import (
+    list_sqlite_backups,
     backup_sqlite_database,
     resolve_sqlite_db_path,
     restore_sqlite_backup,
@@ -206,11 +207,8 @@ def dashboard():
     database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
     backups = []
     if database_uri.startswith("sqlite:///"):
-        db_path = Path(database_uri.replace("sqlite:///", "", 1))
-        if not db_path.is_absolute():
-            db_path = Path.cwd() / db_path
-        backup_dir = db_path.parent / "backups"
-        backups = sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+        backups = list_sqlite_backups(database_uri)
+        current_app.logger.info("Dashboard backup listing scanned uri=%s found=%d", database_uri, len(backups))
 
     month_last_day = monthrange(today.year, today.month)[1]
     if today.day == month_last_day:
