@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from calendar import monthrange
 from pathlib import Path
 
-from flask import Blueprint, flash, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, current_app, flash, redirect, render_template, request, send_file, session, url_for
 
 from app.models import (
     AdminAttendance,
@@ -13,11 +14,14 @@ from app.models import (
     BillingAdvice,
     BillingCycle,
     BillingLineItem,
+    MonthlyPaymentArchive,
     Payment,
     PaymentAllocation,
+    RedBillingNotice,
     RegularSchedule,
     RequiredDepositLedger,
     Student,
+    Supervisor,
     Therapist,
     WeeklyReportArchive,
     db,
@@ -46,10 +50,18 @@ from app.services.import_export_service import (
     import_students_and_schedules,
     import_therapists,
 )
-from app.services.payment_service import archive_payments, record_payment
+from app.services.payment_service import (
+    apply_payment_search,
+    archive_payments,
+    mark_archive_outdated_if_needed_for_payment_date,
+    month_archive_summary,
+    record_payment,
+    refresh_month_archive_with_supervisor,
+)
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
+from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
 
 web_bp = Blueprint("web", __name__)
 
@@ -63,21 +75,236 @@ def _is_billing_advice_editable(advice: BillingAdvice) -> bool:
     return advice.status in BILLING_EDITABLE_STATUSES
 
 
-@web_bp.route("/")
+def _next_session_date(student_id: int, today: date) -> date | None:
+    session = (
+        AttendanceSession.query.filter(AttendanceSession.student_id == student_id, AttendanceSession.session_date > today)
+        .order_by(AttendanceSession.session_date.asc())
+        .first()
+    )
+    return session.session_date if session else None
+
+
+def _red_bill_dates(student_id: int, today: date) -> tuple[date | None, date, bool]:
+    next_session = _next_session_date(student_id, today)
+    if not next_session:
+        return None, today, True
+    due_date = next_session - timedelta(days=1)
+    if due_date < today:
+        return next_session, today, True
+    return next_session, due_date, False
+
+
+def _is_advice_suspended(advice: BillingAdvice, today: date) -> bool:
+    notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    if not notice or advice.total_due <= 0:
+        return False
+    if notice.manual_lift_active:
+        return False
+    return notice.red_bill_due_date < today
+
+
+def _student_is_suspended(student_id: int, on_date: date) -> bool:
+    open_advices = (
+        BillingAdvice.query.filter(
+            BillingAdvice.student_id == student_id,
+            BillingAdvice.total_due > 0,
+            BillingAdvice.status.in_(["Draft", "Issued", "Open"]),
+        ).all()
+    )
+    return any(_is_advice_suspended(advice, on_date) for advice in open_advices)
+
+@web_bp.route("/", methods=["GET", "POST"])
 def dashboard():
     today = date.today()
+
+    if request.method == "POST" and request.form.get("action") == "save_admin_attendance":
+        row = AdminAttendance(
+            admin_id=int(request.form["admin_id"]),
+            attendance_date=datetime.strptime(request.form["attendance_date"], "%Y-%m-%d").date(),
+            status=request.form["status"],
+            shift_label=request.form.get("shift_label", ""),
+            hours_worked=float(request.form.get("hours_worked", 0) or 0),
+            notes=request.form.get("notes", ""),
+        )
+        db.session.add(row)
+        db.session.commit()
+        flash("Admin attendance saved.", "success")
+        return redirect(url_for("web.dashboard"))
+
     due = due_summary(today)
+
+    billings_today = []
+    for student in Student.query.filter_by(active=True).all():
+        anchor = student.created_at.date()
+        days = (today - anchor).days
+        if days < 14:
+            cycle_start = anchor
+        else:
+            cycle_start = anchor + timedelta(days=15 * (days // 15))
+        cycle_end = cycle_start + timedelta(days=14)
+        if cycle_end != today:
+            continue
+
+        cycle = BillingCycle.query.filter_by(start_date=cycle_start, end_date=cycle_end).first()
+        existing = BillingAdvice.query.filter_by(student_id=student.id, billing_cycle_id=(cycle.id if cycle else None)).first() if cycle else None
+        if not existing:
+            billings_today.append({"student": student, "cycle_start": cycle_start, "cycle_end": cycle_end})
+
+    upcoming_dues = BillingAdvice.query.join(BillingCycle).filter(
+        BillingAdvice.total_due > 0,
+        BillingAdvice.status.in_(["Draft", "Issued", "Open"]),
+        BillingCycle.due_date > today,
+        BillingCycle.due_date <= today + timedelta(days=3),
+    ).all()
+    overdue_dues = BillingAdvice.query.join(BillingCycle).filter(
+        BillingAdvice.total_due > 0,
+        BillingAdvice.status.in_(["Draft", "Issued", "Open"]),
+        BillingCycle.due_date < today,
+    ).all()
+
+    red_bills_to_issue = []
+    red_bills_active = []
+    suspension_required = []
+    for advice in overdue_dues:
+        notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+        if not notice:
+            next_session, red_due, immediate = _red_bill_dates(advice.student_id, today)
+            red_bills_to_issue.append({"advice": advice, "next_session_date": next_session, "red_bill_due_date": red_due, "immediate": immediate})
+            continue
+        if advice.total_due <= 0:
+            continue
+        if notice.manual_lift_active:
+            red_bills_active.append({"notice": notice, "advice": advice, "days_remaining": -1, "manual_override": True})
+            continue
+        if today <= notice.red_bill_due_date:
+            days_remaining = (notice.red_bill_due_date - today).days
+            red_bills_active.append({"notice": notice, "advice": advice, "days_remaining": days_remaining})
+        else:
+            suspension_required.append({"notice": notice, "advice": advice})
+
     recent_advices = BillingAdvice.query.order_by(BillingAdvice.created_at.desc()).limit(10).all()
     students = Student.query.order_by(Student.name).all()
     makeup_obligations = {s.id: missed_recovery_summary(student_id=s.id) for s in students}
+
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    backups = []
+    if database_uri.startswith("sqlite:///"):
+        db_path = Path(database_uri.replace("sqlite:///", "", 1))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        backup_dir = db_path.parent / "backups"
+        backups = sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
+
+    month_last_day = monthrange(today.year, today.month)[1]
+    if today.day == month_last_day:
+        reminder_year, reminder_month = today.year, today.month
+    else:
+        prior_month_anchor = today.replace(day=1) - timedelta(days=1)
+        reminder_year, reminder_month = prior_month_anchor.year, prior_month_anchor.month
+
+    monthly_archive_done = (
+        db.session.query(Payment.id)
+        .filter(Payment.is_archived.is_(True), Payment.archive_year == reminder_year, Payment.archive_month == reminder_month)
+        .first()
+        is not None
+    )
+
+    last_sunday = today - timedelta(days=(today.weekday() + 1) % 7)
+    reminder_week_end = last_sunday
+    reminder_week_start = reminder_week_end - timedelta(days=6)
+    weekly_archive_done = WeeklyReportArchive.query.filter_by(week_start=reminder_week_start, week_end=reminder_week_end).first() is not None
+
+    last_month_archive = (
+        db.session.query(Payment.archive_year, Payment.archive_month)
+        .filter(Payment.is_archived.is_(True), Payment.archive_year.isnot(None), Payment.archive_month.isnot(None))
+        .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
+        .first()
+    )
+    last_week_archive = WeeklyReportArchive.query.order_by(WeeklyReportArchive.week_end.desc()).first()
+
+    today_admin_count = AdminAttendance.query.filter(AdminAttendance.attendance_date == today).count()
+    overdue_count = len(overdue_dues)
+    pending_tasks_count = (
+        (1 if overdue_count > 0 or len(billings_today) > 0 else 0)
+        + (0 if monthly_archive_done else 1)
+        + (0 if weekly_archive_done else 1)
+    )
+
+    admin_records = AdminAttendance.query.order_by(AdminAttendance.attendance_date.desc()).limit(10).all()
+
     return render_template(
         "dashboard.html",
         due=due,
+        billings_today=billings_today,
+        upcoming_dues=upcoming_dues,
+        overdue_dues=overdue_dues,
         today=today,
         recent_advices=recent_advices,
         students=students,
         makeup_obligations=makeup_obligations,
+        backups=backups,
+        reminder_year=reminder_year,
+        reminder_month=reminder_month,
+        monthly_archive_done=monthly_archive_done,
+        weekly_archive_done=weekly_archive_done,
+        reminder_week_start=reminder_week_start,
+        reminder_week_end=reminder_week_end,
+        admins=AdminStaff.query.filter_by(active=True).order_by(AdminStaff.name).all(),
+        admin_records=admin_records,
+        overdue_count=overdue_count,
+        pending_tasks_count=pending_tasks_count,
+        today_admin_count=today_admin_count,
+        last_month_archive=last_month_archive,
+        last_week_archive=last_week_archive,
+        red_bills_to_issue=red_bills_to_issue,
+        red_bills_active=red_bills_active,
+        suspension_required=suspension_required,
+        supervisors=Supervisor.query.filter_by(is_active=True).order_by(Supervisor.name).all(),
     )
+
+
+@web_bp.route("/restore-backup/<filename>", methods=["POST"])
+def restore_backup(filename: str):
+    if filename != Path(filename).name or not filename.startswith("app_") or Path(filename).suffix != ".db":
+        flash("Invalid backup filename.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not database_uri.startswith("sqlite:///"):
+        flash("Restore is only supported for sqlite file databases.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    db_path = Path(database_uri.replace("sqlite:///", "", 1))
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+    backup_dir = db_path.parent / "backups"
+    selected_backup = (backup_dir / filename).resolve()
+
+    try:
+        if selected_backup.parent != backup_dir.resolve():
+            raise ValueError("Invalid backup filename.")
+        restore_sqlite_backup(database_uri, selected_backup)
+        flash("Backup restored. Stop the app before restoring in real use because this replaces the current database file.", "success")
+    except (FileNotFoundError, ValueError) as exc:
+        flash(str(exc), "error")
+
+    return redirect(url_for("web.dashboard"))
+
+
+@web_bp.route("/create-backup", methods=["POST"])
+def create_backup():
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not database_uri.startswith("sqlite:///"):
+        flash("Backup is only supported for sqlite file databases.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    backup_path = backup_sqlite_database(database_uri)
+    if not backup_path:
+        flash("Backup creation failed. Ensure the sqlite database file exists.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    flash(f"Backup created: {backup_path.name}", "success")
+    return redirect(url_for("web.dashboard"))
 
 
 @web_bp.route("/attendance", methods=["GET", "POST"])
@@ -107,6 +334,11 @@ def attendance_month():
 
 @web_bp.route("/attendance/daily", methods=["GET", "POST"])
 def daily_schedule():
+    selected_raw = request.form.get("selected_date") if request.method == "POST" else request.args.get("date")
+    selected = datetime.strptime(selected_raw or date.today().isoformat(), "%Y-%m-%d").date()
+    sessions = AttendanceSession.query.filter_by(session_date=selected).order_by(AttendanceSession.start_time).all()
+    suspended_student_ids = {s.student_id for s in sessions if _student_is_suspended(s.student_id, selected)}
+
     if request.method == "POST":
         session_ids = request.form.getlist("session_ids")
         updated = 0
@@ -115,15 +347,24 @@ def daily_schedule():
             session = AttendanceSession.query.get(int(raw_id))
             if not session:
                 continue
+            if session.student_id in suspended_student_ids:
+                if session.status != "Suspended":
+                    update_session_status(session.id, "Suspended")
+                    updated += 1
+                continue
             if session.status != status:
                 update_session_status(session.id, status)
                 updated += 1
         flash(f"Updated {updated} session(s).", "success")
         return redirect(url_for("web.daily_schedule", date=request.form["selected_date"]))
 
-    selected = datetime.strptime(request.args.get("date", date.today().isoformat()), "%Y-%m-%d").date()
-    sessions = AttendanceSession.query.filter_by(session_date=selected).order_by(AttendanceSession.start_time).all()
-    return render_template("daily_schedule.html", selected=selected, sessions=sessions, attendance_statuses=ATTENDANCE_STATUSES)
+    return render_template(
+        "daily_schedule.html",
+        selected=selected,
+        sessions=sessions,
+        attendance_statuses=ATTENDANCE_STATUSES,
+        suspended_student_ids=suspended_student_ids,
+    )
 
 
 @web_bp.route("/students/<int:student_id>")
@@ -173,7 +414,7 @@ def weekly_reports():
         note = request.form.get("note", "")
         try:
             archive_weekly_report(start, end, note=note)
-            flash("Weekly report archived.", "success")
+            flash(f"Weekly report for {start.isoformat()} to {end.isoformat()} archived successfully.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
         return redirect(url_for("web.weekly_reports", date=base.isoformat()))
@@ -222,7 +463,7 @@ def admin_attendance_page():
         db.session.add(row)
         db.session.commit()
         flash("Admin attendance saved.", "success")
-        return redirect(url_for("web.admin_attendance_page"))
+        return redirect(url_for("web.dashboard"))
     records = AdminAttendance.query.order_by(AdminAttendance.attendance_date.desc()).limit(30).all()
     return render_template("admin_attendance.html", admins=AdminStaff.query.all(), records=records)
 
@@ -267,14 +508,92 @@ def billing_page():
     )
 
 
+
+
+
+
+@web_bp.post("/billing/<int:advice_id>/issue-red-bill")
+def issue_red_bill(advice_id: int):
+    advice = BillingAdvice.query.get_or_404(advice_id)
+    if advice.total_due <= 0:
+        flash("Billing advice is already settled.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    today = date.today()
+    next_session, red_due, immediate = _red_bill_dates(advice.student_id, today)
+    notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    if notice:
+        flash("Red Bill already issued for this billing advice.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    notice = RedBillingNotice(billing_advice_id=advice.id, student_id=advice.student_id, issued_date=today)
+    db.session.add(notice)
+    notice.outstanding_amount = advice.total_due
+    notice.next_session_date = next_session
+    notice.red_bill_due_date = red_due
+    notice.status = "issued"
+    db.session.commit()
+    log_audit("red_bill_issued", "BillingAdvice", advice.id, f"due={red_due.isoformat()}|immediate={immediate}")
+    flash(f"Red Bill issued for {advice.student.name}. Red Bill due date: {red_due}.", "success")
+    return redirect(url_for("web.dashboard"))
+
+
+@web_bp.post("/billing/<int:advice_id>/suspension-exception")
+def approve_suspension_exception(advice_id: int):
+    advice = BillingAdvice.query.get_or_404(advice_id)
+    notice = RedBillingNotice.query.filter_by(billing_advice_id=advice.id).first()
+    if not notice or advice.total_due <= 0:
+        flash("No active suspension case for this billing advice.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    supervisor = Supervisor.query.filter_by(name=request.form.get("supervisor_name", ""), is_active=True).first()
+    from werkzeug.security import check_password_hash
+
+    if not supervisor or not check_password_hash(supervisor.password_hash, request.form.get("supervisor_password", "")):
+        flash("Supervisor approval failed. Please check credentials and active status.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    notice.manual_lift_active = True
+    notice.manual_lift_reason = request.form.get("override_reason", "").strip()
+    notice.manual_lift_by_supervisor_id = supervisor.id
+    notice.manual_lift_at = datetime.utcnow()
+    db.session.commit()
+    log_audit(
+        "suspension_partial_settlement_lift_approved",
+        "BillingAdvice",
+        advice.id,
+        f"approver={supervisor.name}|reason={notice.manual_lift_reason}",
+    )
+    flash(f"Suspension exception approved for {advice.student.name}. Attendance is temporarily unlocked.", "success")
+    return redirect(url_for("web.dashboard"))
+
+
+@web_bp.post("/billing/<int:advice_id>/approve-frozen-edit")
+def approve_frozen_billing_edit(advice_id: int):
+    advice = BillingAdvice.query.get_or_404(advice_id)
+    supervisor = Supervisor.query.filter_by(name=request.form.get("supervisor_name", ""), is_active=True).first()
+    from werkzeug.security import check_password_hash
+
+    if not supervisor or not supervisor.can_approve_archive_refresh or not check_password_hash(supervisor.password_hash, request.form.get("supervisor_password", "")):
+        flash("Supervisor approval failed. Please check credentials and active status.", "error")
+        return redirect(url_for("web.billing_edit", advice_id=advice_id))
+
+    session[f"frozen_edit_{advice_id}"] = True
+    reason = request.form.get("approval_reason", "")
+    log_audit("frozen_billing_correction_approved", "BillingAdvice", advice.id, f"approver={supervisor.name}|role={supervisor.role}|reason={reason}")
+    flash("Frozen billing correction approved. You may now edit this advice.", "success")
+    return redirect(url_for("web.billing_edit", advice_id=advice_id, approved=1))
+
+
 @web_bp.route("/billing/<int:advice_id>/edit", methods=["GET", "POST"])
 def billing_edit(advice_id: int):
     advice = BillingAdvice.query.get_or_404(advice_id)
     cycle = advice.billing_cycle
 
-    if not _is_billing_advice_editable(advice):
-        flash("Billing advice is locked and cannot be edited.", "error")
-        return redirect(url_for("web.billing_page", student_id=advice.student_id))
+    is_locked = not _is_billing_advice_editable(advice)
+    is_approved = session.get(f"frozen_edit_{advice.id}") or request.args.get("approved") == "1"
+    if is_locked and not is_approved:
+        return render_template("billing_frozen_approval.html", advice=advice, supervisors=Supervisor.query.filter_by(is_active=True).order_by(Supervisor.name).all())
 
     if request.method == "POST":
         cycle.start_date = datetime.strptime(request.form["cycle_start"], "%Y-%m-%d").date()
@@ -321,6 +640,9 @@ def billing_edit(advice_id: int):
                 db.session.add(BillingLineItem(billing_advice_id=advice.id, item_type=item_type, description=item_type.replace("_", " ").title(), quantity=float(value or 0), rate=0, amount=0))
 
         db.session.commit()
+        if is_locked:
+            session.pop(f"frozen_edit_{advice.id}", None)
+            log_audit("frozen_billing_correction_applied", "BillingAdvice", advice.id, "Approved frozen billing correction applied")
         log_audit("billing_advice_edited", "BillingAdvice", advice.id, "Manual advice edit")
         flash("Billing advice updated.", "success")
         return redirect(url_for("web.billing_page", student_id=advice.student_id))
@@ -388,6 +710,12 @@ def payments_page():
             manual_balance=request.form.get("balance_after_payment", type=float),
         )
         flash(f"Payment recorded (ID {payment.id}).", "success")
+        if mark_archive_outdated_if_needed_for_payment_date(payment.payment_date):
+            month_label = payment.payment_date.strftime("%B %Y")
+            flash(
+                f"This payment affects {month_label}, which is already archived. The archive has been marked Outdated and requires supervisor approval to refresh.",
+                "error",
+            )
         return redirect(url_for("web.payments_tracker"))
     return render_template("payments.html", students=Student.query.all(), admins=AdminStaff.query.filter_by(active=True).all())
 
@@ -397,27 +725,20 @@ def payments_tracker():
     if request.method == "POST" and request.form.get("action") == "archive":
         month = int(request.form["archive_month"])
         year = int(request.form["archive_year"])
-        count = archive_payments(month=month, year=year)
-        flash(f"Archived {count} payment record(s) for {year}-{month:02d}.", "success")
-        return redirect(url_for("web.payments_tracker", view="active"))
+        try:
+            count = archive_payments(month=month, year=year)
+            label = date(year, month, 1).strftime("%B %Y")
+            flash(f"{label} ledger archived successfully ({count} record(s)).", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("web.payments_tracker", view="archived", month=month, year=year))
 
     today = date.today()
     view = request.args.get("view", "active")
     month = request.args.get("month", type=int) or today.month
     year = request.args.get("year", type=int) or today.year
+    search_query = request.args.get("q", "").strip()
 
-    query = Payment.query
-    if view == "archived":
-        query = query.filter(Payment.is_archived.is_(True))
-        query = query.filter(Payment.archive_month == month, Payment.archive_year == year)
-    else:
-        query = query.filter(Payment.is_archived.is_(False))
-        query = query.filter(
-            Payment.payment_date >= date(year, month, 1),
-            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
-        )
-
-    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
     archived_groups = (
         db.session.query(Payment.archive_year, Payment.archive_month)
         .filter(Payment.is_archived.is_(True))
@@ -425,6 +746,32 @@ def payments_tracker():
         .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
         .all()
     )
+    archive_status_map = {
+        (a.archive_year, a.archive_month): a.status
+        for a in MonthlyPaymentArchive.query.filter(MonthlyPaymentArchive.archive_year.isnot(None)).all()
+    }
+
+    selected_archive = None
+    if view == "archived" and archived_groups:
+        selected_archive = (year, month)
+        if selected_archive not in archived_groups:
+            selected_archive = archived_groups[0]
+            year, month = selected_archive
+
+    query = Payment.query.join(Student)
+    if view == "archived":
+        query = query.filter(Payment.is_archived.is_(True), Payment.archive_month == month, Payment.archive_year == year)
+    else:
+        query = query.filter(Payment.is_archived.is_(False))
+        query = query.filter(
+            Payment.payment_date >= date(year, month, 1),
+            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
+        )
+
+    query = apply_payment_search(query, search_query)
+
+    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
+
     return render_template(
         "payments_tracker.html",
         payments=payments,
@@ -434,6 +781,9 @@ def payments_tracker():
         month=month,
         year=year,
         archived_groups=archived_groups,
+        search_query=search_query,
+        payments_count=len(payments),
+        archive_status_map=archive_status_map,
     )
 
 
@@ -442,6 +792,7 @@ def edit_payment(payment_id: int):
     payment = Payment.query.get_or_404(payment_id)
 
     if request.method == "POST":
+        old_payment_date = payment.payment_date
         payment_date = request.form.get("payment_date")
         billing_period_start = request.form.get("billing_period_start")
         billing_period_end = request.form.get("billing_period_end")
@@ -461,6 +812,12 @@ def edit_payment(payment_id: int):
         payment.notes = request.form.get("notes", "")
 
         db.session.commit()
+        if mark_archive_outdated_if_needed_for_payment_date(old_payment_date) or mark_archive_outdated_if_needed_for_payment_date(payment.payment_date):
+            month_label = payment.payment_date.strftime("%B %Y")
+            flash(
+                f"This payment affects {month_label}, which is already archived. The archive has been marked Outdated and requires supervisor approval to refresh.",
+                "error",
+            )
         log_audit("payment_edited", "Payment", payment.id, "Payment edited from web form")
         flash(f"Payment entry {payment.id} updated.", "success")
         return redirect(url_for("web.payments_tracker"))
@@ -473,6 +830,57 @@ def edit_payment(payment_id: int):
     )
 
 
+@web_bp.post("/payments/<int:payment_id>/delete")
+def delete_payment(payment_id: int):
+    payment = Payment.query.get_or_404(payment_id)
+    impacted_date = payment.payment_date
+    db.session.delete(payment)
+    db.session.commit()
+    if mark_archive_outdated_if_needed_for_payment_date(impacted_date):
+        month_label = impacted_date.strftime("%B %Y")
+        flash(
+            f"This payment affects {month_label}, which is already archived. The archive has been marked Outdated and requires supervisor approval to refresh.",
+            "error",
+        )
+    flash(f"Payment entry {payment_id} deleted.", "success")
+    return redirect(url_for("web.payments_tracker"))
+
+
+@web_bp.route("/payments/archive-review/<int:year>/<int:month>", methods=["GET", "POST"])
+def payment_archive_review(year: int, month: int):
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_year=year, archive_month=month).first_or_404()
+    summary = month_archive_summary(month=month, year=year)
+    period_start = date(year, month, 1)
+    period_end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    live_entries = (
+        Payment.query.filter(Payment.payment_date >= period_start, Payment.payment_date < period_end)
+        .order_by(Payment.payment_date.desc(), Payment.id.desc())
+        .all()
+    )
+
+    if request.method == "POST":
+        ok, message = refresh_month_archive_with_supervisor(
+            month=month,
+            year=year,
+            supervisor_name=request.form.get("supervisor_name", ""),
+            password=request.form.get("supervisor_password", ""),
+            reason=request.form.get("refresh_reason", "").strip(),
+        )
+        if ok:
+            flash(message, "success")
+            return redirect(url_for("web.payments_tracker", view="archived", month=month, year=year))
+        flash(message, "error")
+
+    supervisors = Supervisor.query.filter_by(is_active=True).order_by(Supervisor.name).all()
+    return render_template(
+        "payment_archive_review.html",
+        year=year,
+        month=month,
+        snapshot=snapshot,
+        summary=summary,
+        live_entries=live_entries,
+        supervisors=supervisors,
+    )
 
 
 @web_bp.route("/master-data")
@@ -497,6 +905,11 @@ def master_students():
             student.name = name
 
         student.contract_hours_per_week = float(request.form.get("contract_hours_per_week", 0) or 0)
+        student.required_deposit_enabled = request.form.get("required_deposit_enabled", "1") == "1"
+        if not student.required_deposit_enabled:
+            student.required_deposit_total = 0.0
+            student.required_deposit_billed = 0.0
+            student.required_deposit_paid = 0.0
         student.overpayment_credit = float(request.form.get("overpayment_credit", 0) or 0)
         student.active = request.form.get("active", "1") == "1"
         db.session.commit()
@@ -526,6 +939,43 @@ def master_therapists():
         return redirect(url_for("web.master_therapists"))
 
     return render_template("master_therapists.html", therapists=Therapist.query.order_by(Therapist.name).all())
+
+
+
+
+@web_bp.route("/master-data/supervisors", methods=["GET", "POST"])
+def master_supervisors():
+    if request.method == "POST":
+        action = request.form.get("action", "create")
+        name = request.form.get("name", "").strip()
+        role = request.form.get("role", "").strip()
+        if not name or not role:
+            flash("Supervisor name and role are required.", "error")
+            return redirect(url_for("web.master_supervisors"))
+
+        if action == "create":
+            from werkzeug.security import generate_password_hash
+            password = request.form.get("password", "").strip()
+            if not password:
+                flash("Password is required for new supervisors.", "error")
+                return redirect(url_for("web.master_supervisors"))
+            row = Supervisor(name=name, role=role, password_hash=generate_password_hash(password), is_active=True)
+            db.session.add(row)
+        else:
+            from werkzeug.security import generate_password_hash
+            row = Supervisor.query.get_or_404(int(request.form["supervisor_id"]))
+            row.name = name
+            row.role = role
+            row.is_active = request.form.get("is_active", "1") == "1"
+            password = request.form.get("password", "").strip()
+            if password:
+                row.password_hash = generate_password_hash(password)
+
+        db.session.commit()
+        flash("Supervisor saved.", "success")
+        return redirect(url_for("web.master_supervisors"))
+
+    return render_template("master_supervisors.html", supervisors=Supervisor.query.order_by(Supervisor.name).all())
 
 
 @web_bp.route("/master-data/admins", methods=["GET", "POST"])
