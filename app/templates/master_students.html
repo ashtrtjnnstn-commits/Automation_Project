@@ -1,11 +1,18 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Master Data: Students</h2>
+<p><strong>Note:</strong> Deposit policy changes affect <em>future</em> charging only. Historical billed/paid totals are preserved for audit.</p>
 <h3>Add Student</h3>
 <form method="post" class="inline-form">
   <input type="hidden" name="action" value="create" />
   <label>Name <input type="text" name="name" required /></label>
   <label>Contract Hours/Week <input type="number" step="0.5" name="contract_hours_per_week" value="0" /></label>
+  <label>Required Deposit Policy
+    <select name="required_deposit_enabled"><option value="1">With Required Deposit</option><option value="0">No Required Deposit</option></select>
+  </label>
+  <label>Assessment Deposit Policy
+    <select name="assessment_deposit_enabled"><option value="1">With Assessment Deposit</option><option value="0">No Assessment Deposit</option></select>
+  </label>
   <label>Overpayment Credit <input type="number" step="0.01" name="overpayment_credit" value="0" /></label>
   <label>Active
     <select name="active"><option value="1">Yes</option><option value="0">No</option></select>
@@ -15,16 +22,24 @@
 
 <h3>Existing Students</h3>
 <table>
-  <tr><th>Name</th><th>Contract Hours</th><th>Overpayment Credit</th><th>Active</th><th>Edit</th></tr>
+  <tr><th>Name</th><th>Contract Hours</th><th>Required Deposit</th><th>Assessment Deposit Policy</th><th>Overpayment Credit</th><th>Active</th><th>Edit</th></tr>
   {% for s in students %}
   <tr>
-    <td>{{ s.name }}</td><td>{{ s.contract_hours_per_week }}</td><td>{{ s.overpayment_credit }}</td><td>{{ 'Yes' if s.active else 'No' }}</td>
+    <td>{{ s.name }}</td><td>{{ s.contract_hours_per_week }}</td><td>{{ 'With Required Deposit' if s.required_deposit_enabled else 'No Required Deposit' }}{% if not s.required_deposit_enabled and (s.required_deposit_billed > 0 or s.required_deposit_paid > 0) %}<br/><small>Historical values retained (billed: {{ s.required_deposit_billed }}, paid: {{ s.required_deposit_paid }})</small>{% endif %}</td><td>{{ 'With Assessment Deposit' if s.assessment_deposit_enabled else 'No Assessment Deposit' }}{% if not s.assessment_deposit_enabled and (s.assessment_deposit_billed > 0 or s.assessment_deposit_paid > 0) %}<br/><small>Historical values retained (billed: {{ s.assessment_deposit_billed }}, paid: {{ s.assessment_deposit_paid }})</small>{% endif %}</td><td>{{ s.overpayment_credit }}</td><td>{{ 'Yes' if s.active else 'No' }}</td>
     <td>
       <form method="post" class="inline-form">
         <input type="hidden" name="action" value="edit" />
         <input type="hidden" name="student_id" value="{{ s.id }}" />
         <input type="text" name="name" value="{{ s.name }}" required />
         <input type="number" step="0.5" name="contract_hours_per_week" value="{{ s.contract_hours_per_week }}" />
+        <label>Required Deposit Policy
+          <select name="required_deposit_enabled"><option value="1" {% if s.required_deposit_enabled %}selected{% endif %}>With Required Deposit</option><option value="0" {% if not s.required_deposit_enabled %}selected{% endif %}>No Required Deposit</option></select>
+        </label>
+        <small>If set to No Required Deposit, future required deposit charges are skipped. Historical values are preserved.</small>
+        <label>Assessment Deposit Policy
+          <select name="assessment_deposit_enabled"><option value="1" {% if s.assessment_deposit_enabled %}selected{% endif %}>With Assessment Deposit</option><option value="0" {% if not s.assessment_deposit_enabled %}selected{% endif %}>No Assessment Deposit</option></select>
+        </label>
+        <small>If set to No Assessment Deposit, future assessment deposit charges are skipped. Historical values are preserved.</small>
         <input type="number" step="0.01" name="overpayment_credit" value="{{ s.overpayment_credit }}" />
         <select name="active"><option value="1" {% if s.active %}selected{% endif %}>Yes</option><option value="0" {% if not s.active %}selected{% endif %}>No</option></select>
         <button>Update</button>

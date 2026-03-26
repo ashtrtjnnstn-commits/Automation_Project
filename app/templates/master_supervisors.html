@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block content %}
+<h2>Master Data: Supervisors</h2>
+<h3>Add Supervisor</h3>
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="create" />
+  <label>Name <input type="text" name="name" required /></label>
+  <label>Role
+    <select name="role">
+      {% for r in ['Admin Supervisor','Coordinator','Program Head','Assessment Lead','Billing Lead'] %}
+      <option value="{{ r }}">{{ r }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Password <input type="password" name="password" required /></label>
+  <button>Save Supervisor</button>
+</form>
+
+<h3>Existing Supervisors</h3>
+<table>
+  <tr><th>Name</th><th>Role</th><th>Status</th><th>Edit</th></tr>
+  {% for s in supervisors %}
+  <tr>
+    <td>{{ s.name }}</td>
+    <td>{{ s.role }}</td>
+    <td>{{ 'Active' if s.is_active else 'Inactive' }}</td>
+    <td>
+      <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="edit" />
+        <input type="hidden" name="supervisor_id" value="{{ s.id }}" />
+        <input type="text" name="name" value="{{ s.name }}" required />
+        <select name="role">
+          {% for r in ['Admin Supervisor','Coordinator','Program Head','Assessment Lead','Billing Lead'] %}
+          <option value="{{ r }}" {% if s.role == r %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+        <select name="is_active"><option value="1" {% if s.is_active %}selected{% endif %}>Active</option><option value="0" {% if not s.is_active %}selected{% endif %}>Inactive</option></select>
+        <input type="password" name="password" placeholder="Leave blank to keep password" />
+        <button>Update</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4">No supervisors yet.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

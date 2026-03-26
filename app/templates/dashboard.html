@@ -1,49 +1,248 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Dashboard - {{ today }}</h2>
-<div class="cards">
-  <section>
-    <h3>Due Today</h3>
-    <ul>{% for a in due.due_today %}<li><a href="{{ url_for('web.student_profile', student_id=a.student_id) }}">{{ a.student.name }}</a> - {{ a.total_due }}</li>{% else %}<li>None</li>{% endfor %}</ul>
-  </section>
-  <section>
-    <h3>Overdue</h3>
-    <ul>{% for a in due.overdue %}<li><a href="{{ url_for('web.student_profile', student_id=a.student_id) }}">{{ a.student.name }}</a> - {{ a.total_due }}</li>{% else %}<li>None</li>{% endfor %}</ul>
-  </section>
-  <section>
-    <h3>Upcoming (3 days)</h3>
-    <ul>{% for a in due.upcoming %}<li><a href="{{ url_for('web.student_profile', student_id=a.student_id) }}">{{ a.student.name }}</a> - {{ a.total_due }}</li>{% else %}<li>None</li>{% endfor %}</ul>
-  </section>
+{% if suspension_required or red_bills_to_issue %}
+<div class="critical-alert-strip">
+  Critical: {{ suspension_required|length }} suspension case(s) and {{ red_bills_to_issue|length }} red bill(s) pending issuance.
+</div>
+{% endif %}
+
+<div class="summary-strip">
+  <a href="#priority-today">Today's priorities: {{ pending_tasks_count }}</a>
+  <a href="#billing-card">Overdue: {{ overdue_dues|length }}</a>
+  <span>Monthly archive: {{ 'Done' if monthly_archive_done else 'Pending' }}</span>
+  <span>Weekly archive: {{ 'Done' if weekly_archive_done else 'Pending' }}</span>
 </div>
 
-<h3>Outstanding Make-up Obligations</h3>
-<table>
-  <tr>
-    <th>Student Name</th>
-    <th>Total Missed Hours To Date</th>
-    <th>Total Recovered Make-up Hours To Date</th>
-    <th>Outstanding Make-up Hours</th>
-  </tr>
-  {% for student in students %}
-  <tr>
-    <td>{{ student.name }}</td>
-    <td>{{ makeup_obligations[student.id].missed_hours }}</td>
-    <td>{{ makeup_obligations[student.id].recovered_makeup_hours }}</td>
-    <td>{{ makeup_obligations[student.id].remaining_missed_hours }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="4">No students yet.</td></tr>
-  {% endfor %}
-</table>
+<details class="dashboard-group" id="priority-today" open>
+  <summary><strong>Priority Today</strong></summary>
+  <div class="cards">
+    <section id="billing-card" class="action-card {{ 'pending' if overdue_dues else ('attention' if billings_today or upcoming_dues else 'done') }}">
+      <h3>Billings Today</h3>
+      <p>Generate billing advice for students whose cycle closes today.</p>
+      {% if billings_today %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <ul>
+        {% for item in billings_today[:5] %}
+        <li>{{ item.student.name }} ({{ item.cycle_start }} to {{ item.cycle_end }})</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No billing tasks need action today.</p>
+      {% endif %}
+      <p><a class="primary-action" href="{{ url_for('web.billing_page') }}">Go to Billing</a></p>
+    </section>
 
-<h3>Recent Billing Advice</h3>
-<ul>
-  {% for advice in recent_advices %}
-    <li>{{ advice.student.name }} | {{ advice.billing_cycle.start_date }} to {{ advice.billing_cycle.end_date }} | Due {{ advice.billing_cycle.due_date }} | {{ advice.total_due }}</li>
-  {% else %}
-    <li>No advice records yet.</li>
-  {% endfor %}
-</ul>
 
-<p><a href="{{ url_for('web.export_reports_page') }}">Go to Export Reports</a></p>
+    <section class="action-card {{ 'attention' if upcoming_dues else 'done' }}">
+      <h3>Upcoming Dues</h3>
+      <p>Generated billing advice due within 3 days and still unsettled.</p>
+      {% if upcoming_dues %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <ul>{% for a in upcoming_dues[:5] %}<li>{{ a.student.name }} - Due {{ a.billing_cycle.due_date }} - Balance {{ a.total_due }} (Due in {{ (a.billing_cycle.due_date - today).days }} day(s))</li>{% endfor %}</ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No upcoming dues need action right now.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card {{ 'pending' if overdue_dues else 'done' }}">
+      <h3>Overdue</h3>
+      <p>Generated billing advice past due and still unsettled.</p>
+      {% if overdue_dues %}
+      <p><span class="status-label">Status: Overdue</span></p>
+      <ul>{% for a in overdue_dues[:5] %}<li>{{ a.student.name }} - Due {{ a.billing_cycle.due_date }} - Balance {{ a.total_due }} (Past due by {{ (today - a.billing_cycle.due_date).days }} day(s))</li>{% endfor %}</ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No overdue billing advice.</p>
+      {% endif %}
+    </section>
+
+
+    <section class="action-card pending red-alert">
+      <h3>Red Bills To Issue</h3>
+      <p>Overdue and unsettled billing advice requiring Red Bill issuance.</p>
+      {% if red_bills_to_issue %}
+      <p><span class="status-label">Status: Red Bill Needed</span></p>
+      <ul>
+        {% for item in red_bills_to_issue %}
+        <li>{{ item.advice.student.name }} | {{ item.advice.billing_cycle.start_date }} to {{ item.advice.billing_cycle.end_date }} | Outstanding {{ item.advice.total_due }} | Next Session {{ item.next_session_date or 'N/A' }} | Red Bill Due {{ item.red_bill_due_date }} {% if item.immediate %}<span class="status-pill suspended">Immediate Action Required</span>{% endif %}</li>
+        <form method="post" action="{{ url_for('web.issue_red_bill', advice_id=item.advice.id) }}"><button type="submit">Issue Red Bill</button></form>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No Red Bills need issuance right now.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card attention red-alert">
+      <h3>Red Bills Active</h3>
+      <p>Red Bills issued and awaiting settlement before suspension threshold.</p>
+      {% if red_bills_active %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <ul>{% for item in red_bills_active %}<li>{{ item.advice.student.name }} | Outstanding {{ item.advice.total_due }} | Next Session {{ item.notice.next_session_date or 'N/A' }} | Red Bill Due {{ item.notice.red_bill_due_date }} | {% if item.manual_override %}Supervisor Lift Active{% elif item.days_remaining == 0 %}Due Today{% elif item.days_remaining > 0 %}Due in {{ item.days_remaining }} day(s){% else %}Past due by {{ (item.days_remaining * -1) }} day(s){% endif %}</li>{% endfor %}</ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No active Red Bills at this time.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card pending red-alert">
+      <h3>Suspension Required</h3>
+      <p>Red Bill due date passed while billing remains unsettled.</p>
+      {% if suspension_required %}
+      <p><span class="status-label">Status: Suspension Required</span></p>
+      <ul>
+        {% for item in suspension_required %}
+        <li>
+          {{ item.advice.student.name }} | Outstanding {{ item.advice.total_due }} | Next Session {{ item.notice.next_session_date or 'N/A' }} | Red Bill Due {{ item.notice.red_bill_due_date }} | Past due by {{ (today - item.notice.red_bill_due_date).days }} day(s)
+          <form method="post" action="{{ url_for('web.approve_suspension_exception', advice_id=item.advice.id) }}" class="inline-form">
+            <select name="supervisor_name" required>
+              <option value="">Supervisor</option>
+              {% for sup in supervisors %}<option value="{{ sup.name }}">{{ sup.name }}</option>{% endfor %}
+            </select>
+            <input type="password" name="supervisor_password" placeholder="Password" required />
+            <input name="override_reason" placeholder="Reason (optional)" />
+            <button type="submit">Supervisor Lift (Partial)</button>
+          </form>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p><span class="status-label">Status: No action needed</span></p>
+      <p>No suspension action required right now.</p>
+      {% endif %}
+    </section>
+
+    <section class="action-card {{ 'done' if monthly_archive_done else 'pending' }}">
+      <h3>Monthly Ledger Archive</h3>
+      <p>Archive the required month ledger to keep monthly records complete.</p>
+      {% if monthly_archive_done %}
+      <p><span class="status-label">Status: Done</span></p>
+      <p>Monthly archive is complete for {{ ['January','February','March','April','May','June','July','August','September','October','November','December'][reminder_month-1] }} {{ reminder_year }}.</p>
+      {% else %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <p>Archive for {{ ['January','February','March','April','May','June','July','August','September','October','November','December'][reminder_month-1] }} {{ reminder_year }} is still pending.</p>
+      {% endif %}
+      <p>
+        {% if last_month_archive %}
+        Last completed: {{ ['January','February','March','April','May','June','July','August','September','October','November','December'][last_month_archive[1]-1] }} {{ last_month_archive[0] }}.
+        {% else %}
+        Last completed: No archive recorded yet.
+        {% endif %}
+      </p>
+      <p><a class="primary-action" href="{{ url_for('web.payments_tracker', view='archived', month=reminder_month, year=reminder_year) }}">Go to Archive</a></p>
+    </section>
+
+    <section class="action-card {{ 'done' if weekly_archive_done else 'pending' }}">
+      <h3>Weekly Report Archive</h3>
+      <p>Archive the latest completed week to preserve weekly reporting history.</p>
+      {% if weekly_archive_done %}
+      <p><span class="status-label">Status: Done</span></p>
+      <p>No weekly archive action needed right now.</p>
+      {% else %}
+      <p><span class="status-label">Status: Pending</span></p>
+      <p>Archive for {{ reminder_week_start }} to {{ reminder_week_end }} is still pending.</p>
+      {% endif %}
+      <p>
+        {% if last_week_archive %}
+        Last completed: {{ last_week_archive.week_start }} to {{ last_week_archive.week_end }}.
+        {% else %}
+        Last completed: No archive recorded yet.
+        {% endif %}
+      </p>
+      <p><a class="primary-action" href="{{ url_for('web.weekly_reports', date=today.isoformat()) }}">Go to Weekly Archive</a></p>
+    </section>
+  </div>
+</details>
+
+<details class="dashboard-group">
+  <summary><strong>Daily Operations</strong></summary>
+  <h3>Admin Attendance (Dashboard)</h3>
+  <form method="post" class="inline-form">
+    <input type="hidden" name="action" value="save_admin_attendance" />
+    <label>Admin
+      <select name="admin_id">
+        {% for a in admins %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Date <input type="date" name="attendance_date" value="{{ today.isoformat() }}" required /></label>
+    <label>Status
+      <select name="status"><option>Present</option><option>Absent</option></select>
+    </label>
+    <label>Shift Label <input name="shift_label" /></label>
+    <label>Hours <input type="number" step="0.5" name="hours_worked" /></label>
+    <button type="submit">Save</button>
+  </form>
+  {% if today_admin_count == 0 %}
+  <p>No admin attendance entries recorded yet today.</p>
+  {% endif %}
+  <table>
+    <tr><th>Date</th><th>Admin</th><th>Status</th><th>Shift</th><th>Hours</th></tr>
+    {% for r in admin_records %}
+    <tr><td>{{ r.attendance_date }}</td><td>{{ r.admin.name }}</td><td>{{ r.status }}</td><td>{{ r.shift_label }}</td><td>{{ r.hours_worked }}</td></tr>
+    {% else %}
+    <tr><td colspan="5">No admin attendance records yet.</td></tr>
+    {% endfor %}
+  </table>
+</details>
+
+<details class="dashboard-group">
+  <summary><strong>System / Utilities</strong></summary>
+  <h3>Quick Links</h3>
+  <p class="quick-links">
+    <a href="{{ url_for('web.daily_schedule') }}">Daily Schedule</a>
+    <a href="{{ url_for('web.makeup_editor') }}">Make-up Editor</a>
+    <a href="{{ url_for('web.billing_page') }}">Billing</a>
+    <a href="{{ url_for('web.payments_page') }}">Payment</a>
+  </p>
+
+  <h3>Outstanding Make-up Obligations</h3>
+  <table>
+    <tr>
+      <th>Student Name</th>
+      <th>Total Missed Hours To Date</th>
+      <th>Total Recovered Make-up Hours To Date</th>
+      <th>Outstanding Make-up Hours</th>
+    </tr>
+    {% for student in students %}
+    <tr>
+      <td>{{ student.name }}</td>
+      <td>{{ makeup_obligations[student.id].missed_hours }}</td>
+      <td>{{ makeup_obligations[student.id].recovered_makeup_hours }}</td>
+      <td>{{ makeup_obligations[student.id].remaining_missed_hours }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No students yet.</td></tr>
+    {% endfor %}
+  </table>
+
+  <h3>Database Backups</h3>
+  <p><strong>Warning:</strong> Restore should be done while the app is stopped. Restoring now will replace the current database file.</p>
+  <form method="post" action="{{ url_for('web.create_backup') }}" class="inline-form">
+    <button type="submit">Create Backup Now</button>
+  </form>
+  <table>
+    <tr>
+      <th>Backup File</th>
+      <th>Restore</th>
+    </tr>
+    {% for backup in backups %}
+    <tr>
+      <td>{{ backup.name }}</td>
+      <td>
+        <form method="post" action="{{ url_for('web.restore_backup', filename=backup.name) }}" onsubmit="return confirm('Restore this backup? This will replace the current database.');">
+          <button type="submit">Restore</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="2">No backups found.</td></tr>
+    {% endfor %}
+  </table>
+
+  <p><a href="{{ url_for('web.reports_page') }}">Go to Reports</a></p>
+</details>
 {% endblock %}

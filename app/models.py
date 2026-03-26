@@ -34,6 +34,8 @@ class Student(TimestampMixin, db.Model):
     contract_hours_per_week = db.Column(db.Float, default=0.0, nullable=False)
     has_weekday_rate = db.Column(db.Boolean, default=True, nullable=False)
     has_weekend_rate = db.Column(db.Boolean, default=False, nullable=False)
+    required_deposit_enabled = db.Column(db.Boolean, default=True, nullable=False)
+    assessment_deposit_enabled = db.Column(db.Boolean, default=True, nullable=False)
     required_deposit_total = db.Column(db.Float, default=0.0, nullable=False)
     required_deposit_billed = db.Column(db.Float, default=0.0, nullable=False)
     required_deposit_paid = db.Column(db.Float, default=0.0, nullable=False)
@@ -210,6 +212,45 @@ class TherapistPayrollSummary(TimestampMixin, db.Model):
     period_end = db.Column(db.Date, nullable=False)
     total_hours = db.Column(db.Float, nullable=False)
     notes = db.Column(db.Text, default="")
+
+
+class MonthlyPaymentArchive(TimestampMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    archive_year = db.Column(db.Integer, nullable=False)
+    archive_month = db.Column(db.Integer, nullable=False)
+    status = db.Column(db.String(20), default="current", nullable=False)  # current/outdated
+    archived_total_amount = db.Column(db.Float, default=0.0, nullable=False)
+    archived_entry_count = db.Column(db.Integer, default=0, nullable=False)
+
+    __table_args__ = (UniqueConstraint("archive_year", "archive_month", name="uniq_monthly_payment_archive"),)
+
+
+class Supervisor(TimestampMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False)
+    role = db.Column(db.String(80), nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    can_approve_archive_refresh = db.Column(db.Boolean, default=True, nullable=False)
+
+
+class RedBillingNotice(TimestampMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    billing_advice_id = db.Column(db.Integer, db.ForeignKey("billing_advice.id"), nullable=False, unique=True)
+    student_id = db.Column(db.Integer, db.ForeignKey("student.id"), nullable=False)
+    issued_date = db.Column(db.Date, nullable=False)
+    outstanding_amount = db.Column(db.Float, default=0.0, nullable=False)
+    next_session_date = db.Column(db.Date, nullable=True)
+    red_bill_due_date = db.Column(db.Date, nullable=False)
+    status = db.Column(db.String(20), default="issued", nullable=False)
+    manual_lift_active = db.Column(db.Boolean, default=False, nullable=False)
+    manual_lift_reason = db.Column(db.String(255), default="", nullable=False)
+    manual_lift_by_supervisor_id = db.Column(db.Integer, db.ForeignKey("supervisor.id"), nullable=True)
+    manual_lift_at = db.Column(db.DateTime, nullable=True)
+
+    billing_advice = db.relationship("BillingAdvice", backref="red_billing_notice")
+    student = db.relationship("Student", backref="red_billing_notices")
+    manual_lift_by_supervisor = db.relationship("Supervisor")
 
 
 class AuditLog(TimestampMixin, db.Model):

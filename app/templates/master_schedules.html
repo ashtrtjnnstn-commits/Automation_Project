@@ -1,6 +1,40 @@
 {% extends 'base.html' %}
 {% block content %}
 <h2>Master Data: Regular Schedules</h2>
+{% if sync_preview %}
+<section class="action-card attention">
+  <h3>Schedule Sync Preview</h3>
+  <p>From <strong>{{ sync_preview.effective_from }}</strong> onward:</p>
+  <ul>
+    <li>{{ sync_preview.counts.to_remove }} future blank generated session(s) will be removed.</li>
+    <li>{{ sync_preview.counts.to_add }} new future generated session(s) will be added.</li>
+    <li>{{ sync_preview.counts.recorded_preserved }} recorded session(s) will be preserved.</li>
+    <li>{{ sync_preview.counts.override_preserved }} override-related session(s) will be preserved.</li>
+  </ul>
+  <p><strong>This will not change past or recorded attendance.</strong></p>
+  {% if sync_preview.is_past_or_today %}
+  <p class="status-pill suspended">Past dates will not be modified. Only future unmarked sessions will be affected.</p>
+  {% endif %}
+  <form method="post" class="inline-form">
+    <input type="hidden" name="action" value="edit" />
+    <input type="hidden" name="sync_confirmed" value="1" />
+    <input type="hidden" name="schedule_id" value="{{ sync_preview.schedule_id }}" />
+    <input type="hidden" name="student_id" value="{{ sync_preview.student_id }}" />
+    <input type="hidden" name="therapist_id" value="{{ sync_preview.therapist_id }}" />
+    <input type="hidden" name="day_of_week" value="{{ sync_preview.day_of_week }}" />
+    <input type="hidden" name="start_time" value="{{ sync_preview.start_time }}" />
+    <input type="hidden" name="end_time" value="{{ sync_preview.end_time }}" />
+    <input type="hidden" name="active" value="{{ sync_preview.active }}" />
+    <input type="hidden" name="effective_from" value="{{ sync_preview.effective_from }}" />
+    <input type="hidden" name="apply_future_sync" value="1" />
+    <button type="submit">Confirm Apply</button>
+  </form>
+  <form method="post" class="inline-form">
+    <input type="hidden" name="sync_cancel" value="1" />
+    <button type="submit">Cancel</button>
+  </form>
+</section>
+{% endif %}
 <h3>Add Schedule</h3>
 <form method="post" class="inline-form">
   <input type="hidden" name="action" value="create" />
@@ -46,6 +80,16 @@
         <input type="time" name="start_time" value="{{ sc.start_time.strftime('%H:%M') }}" />
         <input type="time" name="end_time" value="{{ sc.end_time.strftime('%H:%M') if sc.end_time else '' }}" />
         <select name="active"><option value="1" {% if sc.active %}selected{% endif %}>Yes</option><option value="0" {% if not sc.active %}selected{% endif %}>No</option></select>
+        <label>Effective From <input type="date" name="effective_from" /></label>
+        <small>Changes will apply only to future unmarked sessions starting this date.</small>
+        <label>Apply Future Sync
+          <select name="apply_future_sync">
+            <option value="1" selected>Yes</option>
+            <option value="0">No</option>
+          </select>
+        </label>
+        <small>Apply this permanent schedule change to future unmarked generated attendance from the effective date onward.</small>
+        <small>This will not change past or recorded attendance.</small>
         <button>Update</button>
       </form>
     </td>
