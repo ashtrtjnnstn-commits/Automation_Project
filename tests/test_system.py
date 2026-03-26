@@ -1460,6 +1460,44 @@ def test_restore_route_restores_selected_backup(app, client, tmp_path):
     assert db_file.read_text() == "backup-db"
 
 
+def test_create_backup_route_creates_file_in_instance_data_backups(app, client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.write_text("live-db")
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+    res = client.post("/create-backup", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Backup created:" in res.data
+    backups = sorted((tmp_path / "instance" / "data" / "backups").glob("app_*.db"))
+    assert len(backups) == 1
+
+
+def test_dashboard_lists_backups_after_manual_creation(app, client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db_file = tmp_path / "instance" / "data" / "app.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.write_text("live-db")
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
+
+    client.post("/create-backup", follow_redirects=True)
+    page = client.get("/")
+    backup_names = [p.name.encode() for p in (tmp_path / "instance" / "data" / "backups").glob("app_*.db")]
+    assert backup_names
+    assert any(name in page.data for name in backup_names)
+
+
+def test_create_backup_route_rejects_non_sqlite_database(app, client):
+    app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://user:pw@localhost/db"
+
+    res = client.post("/create-backup", follow_redirects=True)
+
+    assert res.status_code == 200
+    assert b"Backup is only supported for sqlite file databases." in res.data
+
+
 class _FixedDate(date):
     @classmethod
     def today(cls):

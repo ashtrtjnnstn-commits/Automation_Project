@@ -221,6 +221,9 @@
 
   <h3>Database Backups</h3>
   <p><strong>Warning:</strong> Restore should be done while the app is stopped. Restoring now will replace the current database file.</p>
+  <form method="post" action="{{ url_for('web.create_backup') }}" class="inline-form">
+    <button type="submit">Create Backup Now</button>
+  </form>
   <table>
     <tr>
       <th>Backup File</th>

@@ -61,7 +61,7 @@ from app.services.payment_service import (
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
-from app.utils.backup_utils import restore_sqlite_backup
+from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
 
 web_bp = Blueprint("web", __name__)
 
@@ -288,6 +288,22 @@ def restore_backup(filename: str):
     except (FileNotFoundError, ValueError) as exc:
         flash(str(exc), "error")
 
+    return redirect(url_for("web.dashboard"))
+
+
+@web_bp.route("/create-backup", methods=["POST"])
+def create_backup():
+    database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not database_uri.startswith("sqlite:///"):
+        flash("Backup is only supported for sqlite file databases.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    backup_path = backup_sqlite_database(database_uri)
+    if not backup_path:
+        flash("Backup creation failed. Ensure the sqlite database file exists.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    flash(f"Backup created: {backup_path.name}", "success")
     return redirect(url_for("web.dashboard"))
 
 
