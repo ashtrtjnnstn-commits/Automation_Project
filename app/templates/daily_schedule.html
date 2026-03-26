@@ -12,18 +12,23 @@
   <table>
     <tr><th>Time</th><th>Student</th><th>Therapist</th><th>Status</th><th>Type</th></tr>
     {% for s in sessions %}
-      <tr>
+      {% set is_suspended = s.student_id in suspended_student_ids %}
+      <tr class="{% if is_suspended %}suspended-row{% endif %}">
         <td>{{ s.start_time.strftime('%H:%M') }} - {{ s.end_time.strftime('%H:%M') }}</td>
         <td><a href="{{ url_for('web.student_profile', student_id=s.student_id) }}">{{ s.student.name }}</a></td>
         <td><a href="{{ url_for('web.therapist_profile', therapist_id=s.therapist_id) }}">{{ s.therapist.name }}</a></td>
         <td>
           <input type="hidden" name="session_ids" value="{{ s.id }}" />
+          {% if is_suspended %}
+          <span class="status-pill suspended">Suspended</span>
+          {% else %}
           <select name="status_{{ s.id }}">
             <option value="" {% if not s.status %}selected{% endif %}></option>
             {% for st in attendance_statuses %}
             <option value="{{ st }}" {% if s.status == st %}selected{% endif %}>{{ st }}</option>
             {% endfor %}
           </select>
+          {% endif %}
         </td>
         <td>{{ s.session_type }}</td>
       </tr>

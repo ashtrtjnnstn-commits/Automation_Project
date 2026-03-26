@@ -65,11 +65,60 @@ def _required_deposit_rate(student: Student) -> float:
     return ((weekday_count * WEEKDAY_RATE) + (weekend_count * WEEKEND_RATE)) / total
 
 
+def _safe_amount(value: float | None) -> float:
+    try:
+        return max(float(value or 0.0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _deposit_policy_enabled(student: Student, deposit_type: str) -> bool:
+    if deposit_type == "required":
+        return bool(student.required_deposit_enabled)
+    if deposit_type == "assessment":
+        return bool(student.assessment_deposit_enabled)
+    raise ValueError(f"Unknown deposit_type: {deposit_type}")
+
+
+def _normalize_student_finance_fields(student: Student) -> None:
+    original = (
+        student.required_deposit_total,
+        student.required_deposit_billed,
+        student.required_deposit_paid,
+        student.assessment_deposit_total,
+        student.assessment_deposit_billed,
+        student.assessment_deposit_paid,
+        student.overpayment_credit,
+    )
+    student.required_deposit_total = _safe_amount(student.required_deposit_total)
+    student.required_deposit_billed = min(_safe_amount(student.required_deposit_billed), student.required_deposit_total)
+    student.required_deposit_paid = min(_safe_amount(student.required_deposit_paid), student.required_deposit_total)
+    student.assessment_deposit_total = _safe_amount(student.assessment_deposit_total)
+    if _deposit_policy_enabled(student, "assessment") and student.assessment_deposit_total == 0:
+        student.assessment_deposit_total = 5000.0
+    student.assessment_deposit_billed = min(_safe_amount(student.assessment_deposit_billed), student.assessment_deposit_total)
+    student.assessment_deposit_paid = min(_safe_amount(student.assessment_deposit_paid), student.assessment_deposit_total)
+    student.overpayment_credit = _safe_amount(student.overpayment_credit)
+    updated = (
+        student.required_deposit_total,
+        student.required_deposit_billed,
+        student.required_deposit_paid,
+        student.assessment_deposit_total,
+        student.assessment_deposit_billed,
+        student.assessment_deposit_paid,
+        student.overpayment_credit,
+    )
+    if original != updated:
+        log_audit("student_finance_fields_normalized", "Student", student.id, f"student={student.name}")
+
+
 def initialize_required_deposit(student: Student) -> None:
-    if student.required_deposit_total > 0:
+    if not _deposit_policy_enabled(student, "required"):
+        return
+    if _safe_amount(student.required_deposit_total) > 0:
         return
     rate = _required_deposit_rate(student)
-    student.required_deposit_total = round(student.contract_hours_per_week * rate * 2, 2)
+    student.required_deposit_total = round(max(_safe_amount(student.contract_hours_per_week) * rate * 2, 0), 2)
 
 
 def _session_totals(student_id: int, start_date: date, end_date: date) -> SessionTotals:
@@ -158,6 +207,9 @@ def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = Non
 
 
 def _required_deposit_charge(student: Student) -> float:
+    if not _deposit_policy_enabled(student, "required"):
+        return 0.0
+    _normalize_student_finance_fields(student)
     initialize_required_deposit(student)
     billed_total = _required_billed_total(student)
     paid_total = _required_paid_total(student)
@@ -175,6 +227,9 @@ def _required_deposit_charge(student: Student) -> float:
 
 
 def _assessment_deposit_charge(student: Student) -> float:
+    if not _deposit_policy_enabled(student, "assessment"):
+        return 0.0
+    _normalize_student_finance_fields(student)
     billed_total = _assessment_billed_total(student)
     paid_total = _assessment_paid_total(student)
 
@@ -200,7 +255,7 @@ def _required_billed_total(student: Student) -> float:
         .filter_by(student_id=student.id, entry_type="billed")
         .scalar()
     )
-    return max(student.required_deposit_billed, billed_from_ledger or 0.0)
+    return max(_safe_amount(student.required_deposit_billed), billed_from_ledger or 0.0)
 
 
 def _assessment_billed_total(student: Student) -> float:
@@ -209,7 +264,7 @@ def _assessment_billed_total(student: Student) -> float:
         .filter_by(student_id=student.id, entry_type="billed")
         .scalar()
     )
-    return max(student.assessment_deposit_billed, billed_from_ledger or 0.0)
+    return max(_safe_amount(student.assessment_deposit_billed), billed_from_ledger or 0.0)
 
 
 def _required_tracked_paid_total(student: Student) -> float:
@@ -224,7 +279,7 @@ def _required_tracked_paid_total(student: Student) -> float:
         .filter(Payment.student_id == student.id, PaymentAllocation.allocation_type == "required_deposit")
         .scalar()
     )
-    return max(student.required_deposit_paid, paid_from_ledger or 0.0, paid_from_alloc or 0.0)
+    return max(_safe_amount(student.required_deposit_paid), paid_from_ledger or 0.0, paid_from_alloc or 0.0)
 
 
 def _assessment_tracked_paid_total(student: Student) -> float:
@@ -239,7 +294,7 @@ def _assessment_tracked_paid_total(student: Student) -> float:
         .filter(Payment.student_id == student.id, PaymentAllocation.allocation_type == "assessment_deposit")
         .scalar()
     )
-    return max(student.assessment_deposit_paid, paid_from_ledger or 0.0, paid_from_alloc or 0.0)
+    return max(_safe_amount(student.assessment_deposit_paid), paid_from_ledger or 0.0, paid_from_alloc or 0.0)
 
 
 def _required_paid_total(student: Student) -> float:
@@ -249,7 +304,7 @@ def _required_paid_total(student: Student) -> float:
         .filter(Payment.student_id == student.id, Payment.purpose == "Required Deposit")
         .scalar()
     )
-    inferred = min(student.required_deposit_total, paid_from_purpose or 0.0)
+    inferred = min(_safe_amount(student.required_deposit_total), paid_from_purpose or 0.0)
     return max(tracked, inferred)
 
 
@@ -260,7 +315,7 @@ def _assessment_paid_total(student: Student) -> float:
         .filter(Payment.student_id == student.id, Payment.purpose == "Assessment Deposit")
         .scalar()
     )
-    inferred = min(student.assessment_deposit_total, paid_from_purpose or 0.0)
+    inferred = min(_safe_amount(student.assessment_deposit_total), paid_from_purpose or 0.0)
     return max(tracked, inferred)
 
 
@@ -279,6 +334,7 @@ def generate_billing_advices_for_cycle(cycle_id: int, student_id: int | None = N
 
     with db.session.begin_nested():
         for student in students:
+            _normalize_student_finance_fields(student)
             totals = _session_totals(student.id, cycle.start_date, cycle.end_date)
             subtotal = round(totals.weekday_amount + totals.weekend_amount, 2)
             old_balance = _unpaid_previous_balance(student.id, exclude_cycle_id=cycle.id)
