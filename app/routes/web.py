@@ -63,7 +63,12 @@ from app.services.payment_service import (
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
-from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
+from app.utils.backup_utils import (
+    backup_sqlite_database,
+    resolve_sqlite_db_path,
+    restore_sqlite_backup,
+    validate_backup_filename,
+)
 
 web_bp = Blueprint("web", __name__)
 
@@ -114,6 +119,16 @@ def _student_is_suspended(student_id: int, on_date: date) -> bool:
         ).all()
     )
     return any(_is_advice_suspended(advice, on_date) for advice in open_advices)
+
+
+def _safe_float(raw_value: str | None, field_name: str) -> float:
+    try:
+        value = float(raw_value or 0)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a valid number.")
+    if value < 0:
+        raise ValueError(f"{field_name} cannot be negative.")
+    return value
 
 @web_bp.route("/", methods=["GET", "POST"])
 def dashboard():
@@ -267,28 +282,54 @@ def dashboard():
 
 @web_bp.route("/restore-backup/<filename>", methods=["POST"])
 def restore_backup(filename: str):
-    if filename != Path(filename).name or not filename.startswith("app_") or Path(filename).suffix != ".db":
-        flash("Invalid backup filename.", "error")
-        return redirect(url_for("web.dashboard"))
-
+    selected_backup = None
+    db_path = None
     database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
-    if not database_uri.startswith("sqlite:///"):
-        flash("Restore is only supported for sqlite file databases.", "error")
-        return redirect(url_for("web.dashboard"))
-
-    db_path = Path(database_uri.replace("sqlite:///", "", 1))
-    if not db_path.is_absolute():
-        db_path = Path.cwd() / db_path
-    backup_dir = db_path.parent / "backups"
-    selected_backup = (backup_dir / filename).resolve()
 
     try:
+        validate_backup_filename(filename)
+        db_path = resolve_sqlite_db_path(database_uri)
+        backup_dir = db_path.parent / "backups"
+        selected_backup = (backup_dir / filename).resolve()
+
         if selected_backup.parent != backup_dir.resolve():
             raise ValueError("Invalid backup filename.")
-        restore_sqlite_backup(database_uri, selected_backup)
-        flash("Backup restored. Stop the app before restoring in real use because this replaces the current database file.", "success")
-    except (FileNotFoundError, ValueError) as exc:
+        _, emergency_backup = restore_sqlite_backup(database_uri, selected_backup)
+        flash(
+            f"Backup restored from {filename}. Emergency pre-restore backup: "
+            f"{emergency_backup.name if emergency_backup else 'not created'}.",
+            "success",
+        )
+        log_audit(
+            "backup_restore_attempt",
+            "Database",
+            None,
+            f"result=success|source={filename}|target={db_path}",
+        )
+    except (FileNotFoundError, ValueError, PermissionError) as exc:
+        log_audit(
+            "backup_restore_attempt",
+            "Database",
+            None,
+            f"result=failed|source={filename}|target={db_path}|error={exc}",
+        )
         flash(str(exc), "error")
+    except OSError:
+        log_audit(
+            "backup_restore_attempt",
+            "Database",
+            None,
+            f"result=failed|source={filename}|target={db_path}|error=filesystem",
+        )
+        flash("Restore failed due to filesystem error.", "error")
+    except Exception:
+        log_audit(
+            "backup_restore_attempt",
+            "Database",
+            None,
+            f"result=failed|source={filename}|target={db_path}|error=unexpected",
+        )
+        flash("Restore failed due to an unexpected error.", "error")
 
     return redirect(url_for("web.dashboard"))
 
@@ -908,22 +949,56 @@ def master_students():
             flash("Student name is required.", "error")
             return redirect(url_for("web.master_students"))
 
+        try:
+            contract_hours_per_week = _safe_float(request.form.get("contract_hours_per_week"), "Contract Hours/Week")
+            overpayment_credit = _safe_float(request.form.get("overpayment_credit"), "Overpayment Credit")
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("web.master_students"))
+
         if action == "create":
             student = Student(name=name)
             db.session.add(student)
+            old_required_policy = student.required_deposit_enabled
+            old_assessment_policy = student.assessment_deposit_enabled
         else:
             student = Student.query.get_or_404(int(request.form["student_id"]))
             student.name = name
+            old_required_policy = student.required_deposit_enabled
+            old_assessment_policy = student.assessment_deposit_enabled
 
-        student.contract_hours_per_week = float(request.form.get("contract_hours_per_week", 0) or 0)
+        student.contract_hours_per_week = contract_hours_per_week
+        student.overpayment_credit = overpayment_credit
+
         student.required_deposit_enabled = request.form.get("required_deposit_enabled", "1") == "1"
-        if not student.required_deposit_enabled:
+        student.assessment_deposit_enabled = request.form.get("assessment_deposit_enabled", "1") == "1"
+        if action == "create" and not student.required_deposit_enabled:
             student.required_deposit_total = 0.0
             student.required_deposit_billed = 0.0
             student.required_deposit_paid = 0.0
-        student.overpayment_credit = float(request.form.get("overpayment_credit", 0) or 0)
+        if student.assessment_deposit_enabled and (student.assessment_deposit_total or 0) <= 0:
+            student.assessment_deposit_total = 5000.0
+        if action == "create" and not student.assessment_deposit_enabled:
+            student.assessment_deposit_total = 0.0
+            student.assessment_deposit_billed = 0.0
+            student.assessment_deposit_paid = 0.0
         student.active = request.form.get("active", "1") == "1"
         db.session.commit()
+
+        if old_required_policy != student.required_deposit_enabled:
+            log_audit(
+                "student_required_deposit_policy_changed",
+                "Student",
+                student.id,
+                f"student={student.name}|old={old_required_policy}|new={student.required_deposit_enabled}",
+            )
+        if old_assessment_policy != student.assessment_deposit_enabled:
+            log_audit(
+                "student_assessment_deposit_policy_changed",
+                "Student",
+                student.id,
+                f"student={student.name}|old={old_assessment_policy}|new={student.assessment_deposit_enabled}",
+            )
         flash("Student saved.", "success")
         return redirect(url_for("web.master_students"))
 

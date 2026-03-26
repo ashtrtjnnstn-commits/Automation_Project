@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -10,37 +11,59 @@ from app.utils.audit_utils import log_audit
 logger = logging.getLogger(__name__)
 
 
-def restore_sqlite_backup(database_uri: str, backup_path: str | Path) -> Path:
-    """Restore sqlite database from a backup file.
-
-    Note: restoring while the app is running can be unsafe; stop the app before using this.
-    """
+def resolve_sqlite_db_path(database_uri: str) -> Path:
     if not database_uri.startswith("sqlite:///"):
         raise ValueError("Restore is only supported for sqlite file databases.")
 
     db_path = Path(database_uri.replace("sqlite:///", "", 1))
     if not db_path.is_absolute():
         db_path = Path.cwd() / db_path
+    return db_path
+
+
+def validate_backup_filename(filename: str) -> None:
+    path_name = Path(filename)
+    if filename != path_name.name or not filename.startswith("app_") or path_name.suffix != ".db":
+        raise ValueError("Invalid backup filename.")
+
+
+def _is_readable_file(path: Path) -> bool:
+    return path.exists() and path.is_file() and os.access(path, os.R_OK)
+
+
+def restore_sqlite_backup(database_uri: str, backup_path: str | Path, create_emergency_backup: bool = True) -> tuple[Path, Path | None]:
+    """Restore sqlite database from a backup file.
+
+    Note: restoring while the app is running can be unsafe; stop the app before using this.
+    """
+    db_path = resolve_sqlite_db_path(database_uri)
 
     selected_backup = Path(backup_path)
-    if not selected_backup.exists() or not selected_backup.is_file():
-        raise FileNotFoundError("Selected backup file was not found.")
+    if not _is_readable_file(selected_backup):
+        raise FileNotFoundError("Selected backup file was not found or is not readable.")
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.exists() or not db_path.is_file():
+        raise FileNotFoundError("Restore failed. Live database file could not be located.")
+    if not os.access(db_path, os.W_OK):
+        raise PermissionError("Restore failed. Live database file is not writable.")
+
+    emergency_backup = None
+    if create_emergency_backup:
+        emergency_dir = db_path.parent / "backups"
+        emergency_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        emergency_backup = emergency_dir / f"pre_restore_{stamp}.db"
+        shutil.copy2(db_path, emergency_backup)
+
     shutil.copy2(selected_backup, db_path)
-    log_audit("backup_restored", "Database", None, str(selected_backup))
-    return db_path
+    log_audit("backup_restored", "Database", None, f"source={selected_backup}|target={db_path}")
+    return db_path, emergency_backup
 
 
 def backup_sqlite_database(database_uri: str, keep: int = 7) -> Path | None:
     """Create timestamped backup for sqlite file DB and prune old backups."""
     try:
-        if not database_uri.startswith("sqlite:///"):
-            return None
-
-        db_path = Path(database_uri.replace("sqlite:///", "", 1))
-        if not db_path.is_absolute():
-            db_path = Path.cwd() / db_path
+        db_path = resolve_sqlite_db_path(database_uri)
 
         if not db_path.exists():
             return None
@@ -58,6 +81,8 @@ def backup_sqlite_database(database_uri: str, keep: int = 7) -> Path | None:
 
         log_audit("backup_created", "Database", None, str(backup_path))
         return backup_path
+    except ValueError:
+        return None
     except Exception:
         logger.exception("Automatic DB backup failed")
         return None
