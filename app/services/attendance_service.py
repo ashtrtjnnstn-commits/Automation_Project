@@ -63,6 +63,166 @@ def generate_monthly_sessions(year: int, month: int) -> int:
     return created
 
 
+def _schedule_applies_on_date(schedule: RegularSchedule, session_date: date) -> bool:
+    if not schedule.active:
+        return False
+    if schedule.effective_from and session_date < schedule.effective_from:
+        return False
+    if schedule.effective_to and session_date > schedule.effective_to:
+        return False
+    return session_date.weekday() == schedule.day_of_week
+
+
+def sync_future_generated_sessions_for_schedule_change(
+    schedule: RegularSchedule,
+    previous_day_of_week: int,
+    previous_start_time: time,
+    previous_therapist_id: int,
+    effective_from: date,
+) -> tuple[int, int]:
+    """Forward-effective sync for generated attendance after schedule edits.
+
+    - Only touches generated, blank sessions on/after effective_from.
+    - Preserves past dates, recorded statuses, and manual override-related sessions.
+    """
+    generated_future = AttendanceSession.query.filter(
+        AttendanceSession.student_id == schedule.student_id,
+        AttendanceSession.source_type == "generated",
+        AttendanceSession.session_date >= effective_from,
+    ).all()
+    if not generated_future:
+        return 0, 0
+
+    override_pairs = db.session.query(SessionOverride.original_session_id, SessionOverride.new_session_id).all()
+    protected_ids = {oid for oid, _ in override_pairs if oid} | {nid for _, nid in override_pairs if nid}
+
+    horizon_end = max(s.session_date for s in generated_future)
+    removed = 0
+    added = 0
+
+    # Remove stale generated sessions from old permanent schedule only when safe.
+    for sess in generated_future:
+        if sess.id in protected_ids or sess.status:
+            continue
+        if not (
+            sess.linked_regular_schedule_id == schedule.id
+            or (
+                sess.session_date.weekday() == previous_day_of_week
+                and sess.start_time == previous_start_time
+                and sess.therapist_id == previous_therapist_id
+            )
+        ):
+            continue
+        if _schedule_applies_on_date(schedule, sess.session_date) and sess.start_time == schedule.start_time and sess.therapist_id == schedule.therapist_id:
+            continue
+        db.session.delete(sess)
+        removed += 1
+
+    # Add missing future generated sessions matching the new permanent schedule.
+    cursor = effective_from
+    while cursor <= horizon_end:
+        if _schedule_applies_on_date(schedule, cursor):
+            has_existing_slot = AttendanceSession.query.filter(
+                AttendanceSession.student_id == schedule.student_id,
+                AttendanceSession.session_date == cursor,
+                AttendanceSession.start_time == schedule.start_time,
+            ).first()
+            if not has_existing_slot:
+                db.session.add(
+                    AttendanceSession(
+                        student_id=schedule.student_id,
+                        therapist_id=schedule.therapist_id,
+                        session_date=cursor,
+                        start_time=schedule.start_time,
+                        end_time=schedule.end_time or _time_add(schedule.start_time, schedule.duration_hours),
+                        duration_hours=schedule.duration_hours,
+                        session_type="regular",
+                        source_type="generated",
+                        linked_regular_schedule_id=schedule.id,
+                        status="",
+                    )
+                )
+                added += 1
+        cursor += timedelta(days=1)
+
+    return removed, added
+
+
+def preview_future_generated_sessions_sync(
+    schedule: RegularSchedule,
+    proposed_day_of_week: int,
+    proposed_start_time: time,
+    proposed_therapist_id: int,
+    proposed_duration_hours: float,
+    proposed_end_time: time | None,
+    proposed_active: bool,
+    previous_day_of_week: int,
+    previous_start_time: time,
+    previous_therapist_id: int,
+    effective_from: date,
+) -> dict[str, int]:
+    """Read-only preview counts for forward-effective schedule sync."""
+    generated_future = AttendanceSession.query.filter(
+        AttendanceSession.student_id == schedule.student_id,
+        AttendanceSession.source_type == "generated",
+        AttendanceSession.session_date >= effective_from,
+    ).all()
+    if not generated_future:
+        return {"to_remove": 0, "to_add": 0, "recorded_preserved": 0, "override_preserved": 0}
+
+    override_pairs = db.session.query(SessionOverride.original_session_id, SessionOverride.new_session_id).all()
+    protected_ids = {oid for oid, _ in override_pairs if oid} | {nid for _, nid in override_pairs if nid}
+    recorded_preserved = sum(1 for s in generated_future if s.status)
+    override_preserved = sum(1 for s in generated_future if s.id in protected_ids)
+
+    def _proposed_applies(session_date: date) -> bool:
+        if not proposed_active:
+            return False
+        if schedule.effective_from and session_date < schedule.effective_from:
+            return False
+        if schedule.effective_to and session_date > schedule.effective_to:
+            return False
+        return session_date.weekday() == proposed_day_of_week
+
+    to_remove = 0
+    for sess in generated_future:
+        if sess.id in protected_ids or sess.status:
+            continue
+        if not (
+            sess.linked_regular_schedule_id == schedule.id
+            or (
+                sess.session_date.weekday() == previous_day_of_week
+                and sess.start_time == previous_start_time
+                and sess.therapist_id == previous_therapist_id
+            )
+        ):
+            continue
+        if _proposed_applies(sess.session_date) and sess.start_time == proposed_start_time and sess.therapist_id == proposed_therapist_id:
+            continue
+        to_remove += 1
+
+    horizon_end = max(s.session_date for s in generated_future)
+    to_add = 0
+    cursor = effective_from
+    while cursor <= horizon_end:
+        if _proposed_applies(cursor):
+            has_existing_slot = AttendanceSession.query.filter(
+                AttendanceSession.student_id == schedule.student_id,
+                AttendanceSession.session_date == cursor,
+                AttendanceSession.start_time == proposed_start_time,
+            ).first()
+            if not has_existing_slot:
+                to_add += 1
+        cursor += timedelta(days=1)
+
+    return {
+        "to_remove": to_remove,
+        "to_add": to_add,
+        "recorded_preserved": recorded_preserved,
+        "override_preserved": override_preserved,
+    }
+
+
 def create_makeup_session(
     student_id: int,
     therapist_id: int,

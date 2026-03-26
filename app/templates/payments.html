@@ -1,8 +1,9 @@
 {% extends 'base.html' %}
 {% block content %}
-<h2>Payments Input</h2>
-<p><a href="{{ url_for('web.payments_tracker') }}">Open Payments Tracker tab</a> to validate monthly cashflow.</p>
+<h2>Record a payment and track payment history</h2>
+<h3>Record Payment</h3>
 <form method="post" class="inline-form">
+  <input type="hidden" name="action" value="record_payment" />
   <label>Date <input type="date" name="payment_date" required /></label>
   <label>Name of Client / Guardian <input type="text" name="client_guardian_name" required /></label>
   <label>Name of Student
@@ -44,4 +45,69 @@
   <label>Notes <textarea name="notes"></textarea></label>
   <button>Record Payment</button>
 </form>
+
+<h3>Payment History</h3>
+<div class="inline-form">
+  <a href="{{ url_for('web.payments_page', view='active', month=month, year=year) }}">Active Month Records</a>
+  <a href="{{ url_for('web.payments_page', view='archived', month=month, year=year) }}">Archived Records</a>
+</div>
+
+<form method="get" class="inline-form">
+  <input type="hidden" name="view" value="{{ view }}" />
+  {% if view != 'archived' %}
+  <label>Month <input type="number" min="1" max="12" name="month" value="{{ month }}" /></label>
+  <label>Year <input type="number" name="year" value="{{ year }}" /></label>
+  {% else %}
+  <input type="hidden" name="month" value="{{ month }}" />
+  <input type="hidden" name="year" value="{{ year }}" />
+  {% endif %}
+  <label>Search
+    <input type="text" name="q" value="{{ search_query }}" placeholder="Search by student, guardian, purpose, or billing period (YYYY-MM-DD)" />
+  </label>
+  <button>{% if view == 'archived' %}Search Archives{% else %}Filter Active Month{% endif %}</button>
+</form>
+
+<form method="post" class="inline-form">
+  <input type="hidden" name="action" value="archive" />
+  <label>Archive Month <input type="number" name="archive_month" min="1" max="12" required /></label>
+  <label>Archive Year <input type="number" name="archive_year" required /></label>
+  <button>Archive Records for Month</button>
+</form>
+
+{% if search_query %}
+<p>Showing {{ payments_count }} matching payment entr{{ "y" if payments_count == 1 else "ies" }} for "{{ search_query }}". <a href="{{ url_for('web.payments_page', view=view, month=month, year=year) }}">Clear search</a></p>
+{% endif %}
+
+{% if archived_groups %}
+<h4>Archived Month-Year</h4>
+<ul>
+  {% for y, m in archived_groups %}
+  <li>
+    <a href="{{ url_for('web.payments_page', view='archived', month=m, year=y, q=search_query) }}">{{ ['January','February','March','April','May','June','July','August','September','October','November','December'][m-1] }} {{ y }}</a>
+    <span class="status-label">Status: {{ 'Outdated' if archive_status_map.get((y, m)) == 'outdated' else 'current / up-to-date' }}</span>
+    {% if archive_status_map.get((y, m)) == 'outdated' %}
+      <a href="{{ url_for('web.payment_archive_review', year=y, month=m) }}">Refresh Archive</a>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<table>
+  <tr>
+    <th>Date</th><th>Name of Client / Guardian</th><th>Name of Student</th><th>Purpose</th><th>Billing Period</th>
+    <th>Total Hours Rendered</th><th>Amount Paid</th><th>Received By</th><th>Overpayment</th><th>Balance</th><th>Mode of Transfer</th><th>Actions</th>
+  </tr>
+  {% for p in payments %}
+  <tr>
+    <td>{{ p.payment_date }}</td><td>{{ p.client_guardian_name }}</td><td>{{ p.student.name }}</td><td>{{ p.purpose }}</td>
+    <td>{% if p.billing_period_start and p.billing_period_end %}{{ p.billing_period_start }} to {{ p.billing_period_end }}{% else %}-{% endif %}</td>
+    <td>{{ p.total_hours_rendered }}</td><td>{{ p.amount }}</td><td>{{ p.received_by_admin.name if p.received_by_admin else '-' }}</td>
+    <td>{{ p.overpayment_amount }}</td><td>{{ p.balance_after_payment }}</td><td>{{ p.mode_of_transfer }}</td>
+    <td><a href="{{ url_for('web.edit_payment', payment_id=p.id) }}">Edit</a> | <form method="post" action="{{ url_for('web.delete_payment', payment_id=p.id) }}" style="display:inline"><button type="submit" onclick="return confirm('Delete this payment entry?');">Delete</button></form></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="12">No payment records.</td></tr>
+  {% endfor %}
+</table>
 {% endblock %}
