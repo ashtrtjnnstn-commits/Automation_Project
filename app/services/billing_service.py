@@ -66,6 +66,9 @@ def _required_deposit_rate(student: Student) -> float:
 
 
 def initialize_required_deposit(student: Student) -> None:
+    if not student.required_deposit_enabled:
+        student.required_deposit_total = 0.0
+        return
     if student.required_deposit_total > 0:
         return
     rate = _required_deposit_rate(student)
@@ -158,6 +161,8 @@ def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = Non
 
 
 def _required_deposit_charge(student: Student) -> float:
+    if not student.required_deposit_enabled:
+        return 0.0
     initialize_required_deposit(student)
     billed_total = _required_billed_total(student)
     paid_total = _required_paid_total(student)

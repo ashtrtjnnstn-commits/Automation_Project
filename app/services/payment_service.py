@@ -2,17 +2,91 @@ from __future__ import annotations
 
 from datetime import date
 
+from sqlalchemy import String, cast, or_
+from werkzeug.security import check_password_hash
 from app.models import (
     AssessmentDepositLedger,
     BillingAdvice,
+    MonthlyPaymentArchive,
     Payment,
     PaymentAllocation,
+    RedBillingNotice,
     RequiredDepositLedger,
     Student,
+    Supervisor,
     db,
 )
 from app.services.billing_service import initialize_required_deposit
 from app.utils.audit_utils import log_audit
+
+
+def _ensure_month_archive_snapshot(month: int, year: int) -> MonthlyPaymentArchive:
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=month, archive_year=year).first()
+    if not snapshot:
+        snapshot = MonthlyPaymentArchive(archive_month=month, archive_year=year)
+        db.session.add(snapshot)
+    monthly_rows = Payment.query.filter_by(is_archived=True, archive_month=month, archive_year=year).all()
+    snapshot.archived_total_amount = round(sum(p.amount for p in monthly_rows), 2)
+    snapshot.archived_entry_count = len(monthly_rows)
+    snapshot.status = "current"
+    return snapshot
+
+
+def mark_month_archive_outdated(month: int, year: int) -> None:
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=month, archive_year=year).first()
+    if snapshot:
+        snapshot.status = "outdated"
+        db.session.commit()
+
+
+def mark_archive_outdated_if_needed_for_payment_date(payment_date: date) -> bool:
+    month = payment_date.month
+    year = payment_date.year
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=month, archive_year=year).first()
+    if snapshot and snapshot.status != "outdated":
+        snapshot.status = "outdated"
+        db.session.commit()
+        return True
+    return False
+
+
+def refresh_month_archive_with_supervisor(month: int, year: int, supervisor_name: str, password: str, reason: str = "") -> tuple[bool, str]:
+    supervisor = Supervisor.query.filter_by(name=supervisor_name, is_active=True).first()
+    if not supervisor or not supervisor.can_approve_archive_refresh or not check_password_hash(supervisor.password_hash, password):
+        return False, "Supervisor approval failed. Please check credentials and active status."
+
+    snapshot = _ensure_month_archive_snapshot(month=month, year=year)
+    db.session.commit()
+    try:
+        log_audit(
+            "archive_refresh_approved",
+            "monthly_payment_archive",
+            snapshot.id,
+            f"{year}-{month:02d}|approver={supervisor.name}|role={supervisor.role}|reason={reason}",
+        )
+    except Exception:
+        pass
+    return True, f"{date(year, month, 1).strftime('%B %Y')} archive refreshed successfully."
+
+
+def month_archive_summary(month: int, year: int) -> dict[str, float | int]:
+    snapshot = MonthlyPaymentArchive.query.filter_by(archive_month=month, archive_year=year).first()
+    archived_total = snapshot.archived_total_amount if snapshot else 0.0
+    archived_count = snapshot.archived_entry_count if snapshot else 0
+
+    live_rows = Payment.query.filter(
+        Payment.payment_date >= date(year, month, 1),
+        Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
+    ).all()
+    live_total = round(sum(p.amount for p in live_rows), 2)
+    live_count = len(live_rows)
+    return {
+        "archived_total": archived_total,
+        "archived_count": archived_count,
+        "live_total": live_total,
+        "live_count": live_count,
+        "difference": round(live_total - archived_total, 2),
+    }
 
 
 def record_payment(
@@ -148,15 +222,57 @@ def record_payment(
             payment.balance_after_payment = manual_balance
 
     db.session.commit()
+    _sync_red_billing_after_settlement(student_id)
     try:
         log_audit("payment_recorded", "Payment", payment.id, f"amount={amount}")
     except Exception:
         pass
+    mark_archive_outdated_if_needed_for_payment_date(payment.payment_date)
     return payment
 
 
+def _sync_red_billing_after_settlement(student_id: int) -> None:
+    notices = RedBillingNotice.query.filter_by(student_id=student_id).all()
+    changed = False
+    for notice in notices:
+        advice = notice.billing_advice
+        if not advice:
+            continue
+        notice.outstanding_amount = advice.total_due
+        if advice.total_due <= 0:
+            notice.status = "settled"
+            notice.manual_lift_active = False
+        else:
+            notice.status = "issued"
+        changed = True
+    if changed:
+        db.session.commit()
+
+
+def apply_payment_search(query, search_query: str):
+    term = (search_query or "").strip()
+    if not term:
+        return query
+
+    like = f"%{term}%"
+    return query.filter(
+        or_(
+            Student.name.ilike(like),
+            Payment.client_guardian_name.ilike(like),
+            Payment.purpose.ilike(like),
+            cast(Payment.billing_period_start, String).ilike(like),
+            cast(Payment.billing_period_end, String).ilike(like),
+        )
+    )
+
+
 def archive_payments(month: int, year: int) -> int:
+    already_archived = Payment.query.filter_by(is_archived=True, archive_month=month, archive_year=year).first()
+    if already_archived:
+        raise ValueError(f"Archive for {year}-{month:02d} already exists.")
+
     payments = Payment.query.filter(
+        Payment.is_archived.is_(False),
         Payment.payment_date >= date(year, month, 1),
         Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
     ).all()
@@ -164,5 +280,6 @@ def archive_payments(month: int, year: int) -> int:
         p.is_archived = True
         p.archive_month = month
         p.archive_year = year
+    _ensure_month_archive_snapshot(month=month, year=year)
     db.session.commit()
     return len(payments)
