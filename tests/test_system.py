@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 import pytest
 from openpyxl import Workbook, load_workbook
 
+from app import create_app
 from app.models import (
     AdminStaff,
     AssessmentDepositLedger,
@@ -119,6 +120,23 @@ def test_assessment_deposit_tracking(session):
     assert advice.assessment_deposit_charge == 2500.0
 
 
+def test_assessment_deposit_defaults_enabled_for_existing_compatibility(session):
+    s = Student(name="Assessment Policy Default", contract_hours_per_week=2)
+    db.session.add(s)
+    db.session.commit()
+    assert s.assessment_deposit_enabled is True
+
+
+def test_assessment_deposit_disabled_prevents_billing_charge(session):
+    s, _ = setup_basic()
+    s.assessment_deposit_enabled = False
+    db.session.commit()
+
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+    assert advice.assessment_deposit_charge == 0.0
+
+
 def test_required_deposit_charge_respects_paid_amount(session):
     s, _ = setup_basic()
     s.required_deposit_total = 10000
@@ -141,6 +159,52 @@ def test_assessment_deposit_charge_respects_paid_amount(session):
     cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
     advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
     assert advice.assessment_deposit_charge == 100
+
+
+def test_billing_normalizes_negative_student_finance_values(session):
+    s, _ = setup_basic()
+    s.required_deposit_total = -100
+    s.required_deposit_billed = -25
+    s.required_deposit_paid = -10
+    s.assessment_deposit_total = -100
+    s.assessment_deposit_billed = -20
+    s.assessment_deposit_paid = -5
+    s.overpayment_credit = -7
+    db.session.commit()
+
+    generate_monthly_sessions(2026, 1)
+    mark_rendered(s.id)
+    cycle = generate_billing_cycles_for_range(date(2026, 1, 1), date(2026, 1, 15))[0]
+    advice = generate_billing_advices_for_cycle(cycle.id, student_id=s.id)[0]
+
+    db.session.refresh(s)
+    assert s.required_deposit_total >= 0
+    assert s.required_deposit_billed >= 0
+    assert s.required_deposit_paid >= 0
+    assert s.assessment_deposit_total >= 0
+    assert s.assessment_deposit_billed >= 0
+    assert s.assessment_deposit_paid >= 0
+    assert s.overpayment_credit >= 0
+    assert advice.required_deposit_charge >= 0
+    assert advice.assessment_deposit_charge >= 0
+
+
+def test_deposit_charge_helpers_handle_none_finance_values_without_crash(session):
+    s, _ = setup_basic()
+    s.required_deposit_total = None
+    s.required_deposit_billed = None
+    s.required_deposit_paid = None
+    s.assessment_deposit_total = None
+    s.assessment_deposit_billed = None
+    s.assessment_deposit_paid = None
+    s.overpayment_credit = None
+    from app.services.billing_service import _assessment_deposit_charge, _required_deposit_charge
+
+    with db.session.no_autoflush:
+        req = _required_deposit_charge(s)
+        ass = _assessment_deposit_charge(s)
+    assert req >= 0
+    assert ass >= 0
 
 
 def test_billing_excludes_replaced_original_session(session):
@@ -380,6 +444,314 @@ def test_master_data_schedule_validation_end_time(session, client):
     )
     assert response.status_code == 200
     assert b"End time must be after start time." in response.data
+
+
+def _setup_generated_schedule_sync_case():
+    s, t = setup_basic()
+    sched = RegularSchedule.query.filter_by(student_id=s.id).first()
+    generate_monthly_sessions(2026, 3)
+    return s, t, sched
+
+
+def test_schedule_sync_keeps_past_generated_attendance_unchanged(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    past = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 16), source_type="generated").first()
+    assert past is not None
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    unchanged = AttendanceSession.query.get(past.id)
+    assert unchanged is not None
+    assert unchanged.start_time == time(9, 0)
+
+
+def test_schedule_sync_updates_future_blank_generated_from_effective_date(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    removed_old = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+    added_new = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first()
+    assert removed_old is None
+    assert added_new is not None
+
+
+def test_schedule_sync_preserves_recorded_future_attendance(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    recorded = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 23), start_time=time(9, 0), source_type="generated").first()
+    recorded.status = "Present"
+    db.session.commit()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    still_recorded = AttendanceSession.query.get(recorded.id)
+    assert still_recorded is not None
+    assert still_recorded.status == "Present"
+
+
+def test_schedule_sync_preserves_manual_overrides(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    manual = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 3, 24),
+        start_time=time(10, 0),
+        end_time=time(11, 0),
+        duration_hours=1,
+        session_type="makeup",
+        source_type="manual",
+        status="",
+    )
+    db.session.add(manual)
+    db.session.commit()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    kept_manual = AttendanceSession.query.get(manual.id)
+    generated_same_slot = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first()
+    assert kept_manual is not None
+    assert kept_manual.source_type == "manual"
+    assert generated_same_slot is None
+
+
+def test_schedule_sync_removes_old_future_blank_dates_and_adds_new_safe_dates(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    old_blank = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+    assert old_blank is not None
+
+    res = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+            "sync_confirmed": "1",
+        },
+        follow_redirects=True,
+    )
+
+    assert b"Apply this permanent schedule change to future unmarked generated attendance from the effective date onward." in res.data
+    assert AttendanceSession.query.get(old_blank.id) is None
+    assert AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first() is not None
+
+
+def test_schedule_sync_preview_step_appears_with_counts(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    recorded = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 23), source_type="generated").first()
+    recorded.status = "Present"
+    original_for_override = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), source_type="generated").first()
+    manual = AttendanceSession(
+        student_id=s.id,
+        therapist_id=t.id,
+        session_date=date(2026, 3, 30),
+        start_time=time(11, 0),
+        end_time=time(12, 0),
+        duration_hours=1,
+        session_type="makeup",
+        source_type="manual",
+        status="",
+    )
+    db.session.add(manual)
+    db.session.flush()
+    db.session.add(SessionOverride(original_session_id=original_for_override.id, new_session_id=manual.id, override_type="makeup"))
+    db.session.commit()
+
+    preview = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    assert b"Schedule Sync Preview" in preview.data
+    assert b"future blank generated session(s) will be removed" in preview.data
+    assert b"new future generated session(s) will be added" in preview.data
+    assert b"recorded session(s) will be preserved" in preview.data
+    assert b"override-related session(s) will be preserved" in preview.data
+
+
+def test_cancel_schedule_sync_preview_does_not_apply_changes(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    old_blank = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    cancel = client.post("/master-data/schedules", data={"sync_cancel": "1"}, follow_redirects=True)
+    assert b"No attendance changes were applied." in cancel.data
+    assert AttendanceSession.query.get(old_blank.id) is not None
+    assert AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first() is None
+
+
+def test_confirm_schedule_sync_preview_applies_and_shows_human_feedback(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    old_blank = AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 30), start_time=time(9, 0), source_type="generated").first()
+
+    client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    confirmed = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "sync_confirmed": "1",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-03-18",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+
+    assert b"Schedule updated successfully." in confirmed.data
+    assert b"outdated future sessions removed." in confirmed.data
+    assert b"new future sessions added." in confirmed.data
+    assert b"Recorded attendance and overrides were preserved." in confirmed.data
+    assert AttendanceSession.query.get(old_blank.id) is None
+    assert AttendanceSession.query.filter_by(student_id=s.id, session_date=date(2026, 3, 24), start_time=time(10, 0), source_type="generated").first() is not None
+
+
+def test_schedule_sync_ui_helper_texts_and_default_on_render(session, client):
+    setup_basic()
+    page = client.get("/master-data/schedules")
+    assert b"Changes will apply only to future unmarked sessions starting this date." in page.data
+    assert b"This will not change past or recorded attendance." in page.data
+    assert b'<option value=\"1\" selected>Yes</option>' in page.data
+
+
+def test_schedule_sync_preview_shows_past_date_warning(session, client):
+    s, t, sched = _setup_generated_schedule_sync_case()
+    preview = client.post(
+        "/master-data/schedules",
+        data={
+            "action": "edit",
+            "schedule_id": str(sched.id),
+            "student_id": str(s.id),
+            "therapist_id": str(t.id),
+            "day_of_week": "1",
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "active": "1",
+            "effective_from": "2026-01-01",
+            "apply_future_sync": "1",
+        },
+        follow_redirects=True,
+    )
+    assert b"Past dates will not be modified. Only future unmarked sessions will be affected." in preview.data
 
 
 def test_weekly_report_archive_creation_and_view(session, client):
@@ -1296,6 +1668,141 @@ def test_backup_retention_keeps_latest_seven(tmp_path):
 
     backup_sqlite_database(f"sqlite:///{db_file}", keep=7)
     assert len(list(backup_dir.glob("app_*.db"))) == 7
+
+
+def test_backup_creation_with_official_relative_uri_uses_data_backups(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    live_db = tmp_path / "data" / "app.db"
+    live_db.parent.mkdir(parents=True, exist_ok=True)
+    live_db.write_text("live-db")
+
+    backup = backup_sqlite_database("sqlite:///data/app.db")
+    assert backup is not None
+    assert backup.parent == tmp_path / "data" / "backups"
+    assert backup.name.startswith("app_")
+
+
+def test_backup_listing_with_official_relative_uri_reads_data_backups(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    live_db = tmp_path / "data" / "app.db"
+    backup_dir = tmp_path / "data" / "backups"
+    live_db.parent.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    live_db.write_text("live-db")
+    (backup_dir / "app_20260101_000001.db").write_text("b1")
+
+    listed = list_sqlite_backups("sqlite:///data/app.db")
+    assert listed
+    assert listed[0].parent == backup_dir
+
+
+def test_backup_listing_uses_database_sibling_backups_directory(tmp_path):
+    db_file = tmp_path / "nested" / "db" / "app.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_file.write_text("db-bytes")
+    backup_path = backup_sqlite_database(f"sqlite:///{db_file}")
+    assert backup_path is not None
+
+    listed = list_sqlite_backups(f"sqlite:///{db_file}")
+    assert listed
+    assert listed[0].parent == db_file.parent / "backups"
+    assert listed[0].name.startswith("app_")
+    assert listed[0].suffix == ".db"
+
+
+def test_official_sqlite_relative_uri_resolves_to_project_data_app_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    resolved = resolve_sqlite_db_path("sqlite:///data/app.db")
+    assert resolved == tmp_path / "data" / "app.db"
+
+
+def test_legacy_instance_database_migrates_when_official_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    legacy_path = tmp_path / "instance" / "data" / "app.db"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy-db")
+
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    official_path = tmp_path / "data" / "app.db"
+    assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{official_path}"
+    assert official_path.read_text() == "legacy-db"
+
+
+def test_legacy_migration_does_not_overwrite_existing_official_db(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    legacy_path = tmp_path / "instance" / "data" / "app.db"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy-db")
+    official_path = tmp_path / "data" / "app.db"
+    official_path.parent.mkdir(parents=True, exist_ok=True)
+    official_path.write_text("official-db")
+
+    create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    assert official_path.read_text() == "official-db"
+
+
+def test_sqlite_parent_directory_is_auto_created_when_missing(tmp_path, monkeypatch):
+    from app import _ensure_sqlite_parent_directory
+    from flask import Flask
+
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    app = Flask(__name__, instance_relative_config=True)
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///data/app.db"
+    target_dir = tmp_path / "data"
+    assert not target_dir.exists()
+    _ensure_sqlite_parent_directory(app)
+
+    assert target_dir.exists()
+
+
+def test_init_db_no_longer_requires_manual_instance_data_creation(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    target_dir = tmp_path / "data"
+    db_file = target_dir / "app.db"
+
+    result = app.test_cli_runner().invoke(args=["init-db"])
+
+    assert result.exit_code == 0
+    assert target_dir.exists()
+    assert db_file.exists()
+
+
+def test_existing_sqlite_parent_directory_remains_safe(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    seed_app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    target_dir = tmp_path / "data"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    result = app.test_cli_runner().invoke(args=["init-db"])
+
+    assert result.exit_code == 0
+    assert target_dir.exists()
+
+
+def test_non_sqlite_database_uri_does_not_create_sqlite_directories(tmp_path, monkeypatch):
+    from app import _ensure_sqlite_parent_directory
+    from flask import Flask
+
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    app = Flask(__name__, instance_relative_config=True)
+    app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://user:pw@localhost/db"
+    _ensure_sqlite_parent_directory(app)
+
+    assert not (tmp_path / "data").exists()
+
+
+def test_system_no_longer_uses_instance_data_as_live_db_after_migration(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
+    legacy_path = tmp_path / "instance" / "data" / "app.db"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text("legacy-db")
+
+    app = create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///data/app.db"})
+    official_path = tmp_path / "data" / "app.db"
+
+    assert app.config["SQLALCHEMY_DATABASE_URI"] == f"sqlite:///{official_path}"
+    assert official_path.exists()
 
 
 def test_editing_issued_billing_advice_is_blocked(session, client):
