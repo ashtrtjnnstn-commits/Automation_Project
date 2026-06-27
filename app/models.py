@@ -35,7 +35,6 @@ class Student(TimestampMixin, db.Model):
     has_weekday_rate = db.Column(db.Boolean, default=True, nullable=False)
     has_weekend_rate = db.Column(db.Boolean, default=False, nullable=False)
     required_deposit_enabled = db.Column(db.Boolean, default=True, nullable=False)
-    assessment_deposit_enabled = db.Column(db.Boolean, default=True, nullable=False)
     required_deposit_total = db.Column(db.Float, default=0.0, nullable=False)
     required_deposit_billed = db.Column(db.Float, default=0.0, nullable=False)
     required_deposit_paid = db.Column(db.Float, default=0.0, nullable=False)

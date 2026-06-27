@@ -63,13 +63,7 @@ from app.services.payment_service import (
 from app.services.weekly_archive_service import archive_weekly_report, get_archive_sections
 from app.utils.audit_utils import log_audit
 from app.utils.date_utils import week_bounds
-from app.utils.backup_utils import (
-    list_sqlite_backups,
-    backup_sqlite_database,
-    resolve_sqlite_db_path,
-    restore_sqlite_backup,
-    validate_backup_filename,
-)
+from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
 
 web_bp = Blueprint("web", __name__)
 
@@ -120,16 +114,6 @@ def _student_is_suspended(student_id: int, on_date: date) -> bool:
         ).all()
     )
     return any(_is_advice_suspended(advice, on_date) for advice in open_advices)
-
-
-def _safe_float(raw_value: str | None, field_name: str) -> float:
-    try:
-        value = float(raw_value or 0)
-    except (TypeError, ValueError):
-        raise ValueError(f"{field_name} must be a valid number.")
-    if value < 0:
-        raise ValueError(f"{field_name} cannot be negative.")
-    return value
 
 @web_bp.route("/", methods=["GET", "POST"])
 def dashboard():
@@ -207,8 +191,11 @@ def dashboard():
     database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
     backups = []
     if database_uri.startswith("sqlite:///"):
-        backups = list_sqlite_backups(database_uri)
-        current_app.logger.info("Dashboard backup listing scanned uri=%s found=%d", database_uri, len(backups))
+        db_path = Path(database_uri.replace("sqlite:///", "", 1))
+        if not db_path.is_absolute():
+            db_path = Path.cwd() / db_path
+        backup_dir = db_path.parent / "backups"
+        backups = sorted(backup_dir.glob("app_*.db"), key=lambda p: p.stat().st_mtime, reverse=True) if backup_dir.exists() else []
 
     month_last_day = monthrange(today.year, today.month)[1]
     if today.day == month_last_day:
@@ -280,54 +267,28 @@ def dashboard():
 
 @web_bp.route("/restore-backup/<filename>", methods=["POST"])
 def restore_backup(filename: str):
-    selected_backup = None
-    db_path = None
+    if filename != Path(filename).name or not filename.startswith("app_") or Path(filename).suffix != ".db":
+        flash("Invalid backup filename.", "error")
+        return redirect(url_for("web.dashboard"))
+
     database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
+    if not database_uri.startswith("sqlite:///"):
+        flash("Restore is only supported for sqlite file databases.", "error")
+        return redirect(url_for("web.dashboard"))
+
+    db_path = Path(database_uri.replace("sqlite:///", "", 1))
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+    backup_dir = db_path.parent / "backups"
+    selected_backup = (backup_dir / filename).resolve()
 
     try:
-        validate_backup_filename(filename)
-        db_path = resolve_sqlite_db_path(database_uri)
-        backup_dir = db_path.parent / "backups"
-        selected_backup = (backup_dir / filename).resolve()
-
         if selected_backup.parent != backup_dir.resolve():
             raise ValueError("Invalid backup filename.")
-        _, emergency_backup = restore_sqlite_backup(database_uri, selected_backup)
-        flash(
-            f"Backup restored from {filename}. Emergency pre-restore backup: "
-            f"{emergency_backup.name if emergency_backup else 'not created'}.",
-            "success",
-        )
-        log_audit(
-            "backup_restore_attempt",
-            "Database",
-            None,
-            f"result=success|source={filename}|target={db_path}",
-        )
-    except (FileNotFoundError, ValueError, PermissionError) as exc:
-        log_audit(
-            "backup_restore_attempt",
-            "Database",
-            None,
-            f"result=failed|source={filename}|target={db_path}|error={exc}",
-        )
+        restore_sqlite_backup(database_uri, selected_backup)
+        flash("Backup restored. Stop the app before restoring in real use because this replaces the current database file.", "success")
+    except (FileNotFoundError, ValueError) as exc:
         flash(str(exc), "error")
-    except OSError:
-        log_audit(
-            "backup_restore_attempt",
-            "Database",
-            None,
-            f"result=failed|source={filename}|target={db_path}|error=filesystem",
-        )
-        flash("Restore failed due to filesystem error.", "error")
-    except Exception:
-        log_audit(
-            "backup_restore_attempt",
-            "Database",
-            None,
-            f"result=failed|source={filename}|target={db_path}|error=unexpected",
-        )
-        flash("Restore failed due to an unexpected error.", "error")
 
     return redirect(url_for("web.dashboard"))
 
@@ -815,20 +776,73 @@ def payments_page():
                 f"This payment affects {month_label}, which is already archived. The archive has been marked Outdated and requires supervisor approval to refresh.",
                 "error",
             )
-        return redirect(url_for("web.payments_page"))
+        return redirect(url_for("web.payments_tracker"))
+    return render_template("payments.html", students=Student.query.all(), admins=AdminStaff.query.filter_by(active=True).all())
+
+
+@web_bp.route("/payments/tracker", methods=["GET", "POST"])
+def payments_tracker():
+    if request.method == "POST" and request.form.get("action") == "archive":
+        month = int(request.form["archive_month"])
+        year = int(request.form["archive_year"])
+        try:
+            count = archive_payments(month=month, year=year)
+            label = date(year, month, 1).strftime("%B %Y")
+            flash(f"{label} ledger archived successfully ({count} record(s)).", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("web.payments_tracker", view="archived", month=month, year=year))
 
     today = date.today()
     view = request.args.get("view", "active")
     month = request.args.get("month", type=int) or today.month
     year = request.args.get("year", type=int) or today.year
     search_query = request.args.get("q", "").strip()
-    history_ctx = _build_payment_history_context(view=view, month=month, year=year, search_query=search_query)
+
+    archived_groups = (
+        db.session.query(Payment.archive_year, Payment.archive_month)
+        .filter(Payment.is_archived.is_(True))
+        .distinct()
+        .order_by(Payment.archive_year.desc(), Payment.archive_month.desc())
+        .all()
+    )
+    archive_status_map = {
+        (a.archive_year, a.archive_month): a.status
+        for a in MonthlyPaymentArchive.query.filter(MonthlyPaymentArchive.archive_year.isnot(None)).all()
+    }
+
+    selected_archive = None
+    if view == "archived" and archived_groups:
+        selected_archive = (year, month)
+        if selected_archive not in archived_groups:
+            selected_archive = archived_groups[0]
+            year, month = selected_archive
+
+    query = Payment.query.join(Student)
+    if view == "archived":
+        query = query.filter(Payment.is_archived.is_(True), Payment.archive_month == month, Payment.archive_year == year)
+    else:
+        query = query.filter(Payment.is_archived.is_(False))
+        query = query.filter(
+            Payment.payment_date >= date(year, month, 1),
+            Payment.payment_date < (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)),
+        )
+
+    query = apply_payment_search(query, search_query)
+
+    payments = query.order_by(Payment.payment_date.desc(), Payment.id.desc()).all()
 
     return render_template(
         "payments.html",
         students=Student.query.order_by(Student.name).all(),
         admins=AdminStaff.query.filter_by(active=True).order_by(AdminStaff.name).all(),
-        **history_ctx,
+        view=view,
+        month=month,
+        year=year,
+        archived_groups=archived_groups,
+        search_query=search_query,
+        payments_count=len(payments),
+        archive_status_map=archive_status_map,
     )
 
 
@@ -962,24 +976,14 @@ def master_students():
         else:
             student = Student.query.get_or_404(int(request.form["student_id"]))
             student.name = name
-            old_required_policy = student.required_deposit_enabled
-            old_assessment_policy = student.assessment_deposit_enabled
 
-        student.contract_hours_per_week = contract_hours_per_week
-        student.overpayment_credit = overpayment_credit
-
+        student.contract_hours_per_week = float(request.form.get("contract_hours_per_week", 0) or 0)
         student.required_deposit_enabled = request.form.get("required_deposit_enabled", "1") == "1"
-        student.assessment_deposit_enabled = request.form.get("assessment_deposit_enabled", "1") == "1"
-        if action == "create" and not student.required_deposit_enabled:
+        if not student.required_deposit_enabled:
             student.required_deposit_total = 0.0
             student.required_deposit_billed = 0.0
             student.required_deposit_paid = 0.0
-        if student.assessment_deposit_enabled and (student.assessment_deposit_total or 0) <= 0:
-            student.assessment_deposit_total = 5000.0
-        if action == "create" and not student.assessment_deposit_enabled:
-            student.assessment_deposit_total = 0.0
-            student.assessment_deposit_billed = 0.0
-            student.assessment_deposit_paid = 0.0
+        student.overpayment_credit = float(request.form.get("overpayment_credit", 0) or 0)
         student.active = request.form.get("active", "1") == "1"
         db.session.commit()
 

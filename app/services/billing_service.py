@@ -113,9 +113,10 @@ def _normalize_student_finance_fields(student: Student) -> None:
 
 
 def initialize_required_deposit(student: Student) -> None:
-    if not _deposit_policy_enabled(student, "required"):
+    if not student.required_deposit_enabled:
+        student.required_deposit_total = 0.0
         return
-    if _safe_amount(student.required_deposit_total) > 0:
+    if student.required_deposit_total > 0:
         return
     rate = _required_deposit_rate(student)
     student.required_deposit_total = round(max(_safe_amount(student.contract_hours_per_week) * rate * 2, 0), 2)
@@ -207,9 +208,8 @@ def _unpaid_previous_balance(student_id: int, exclude_cycle_id: int | None = Non
 
 
 def _required_deposit_charge(student: Student) -> float:
-    if not _deposit_policy_enabled(student, "required"):
+    if not student.required_deposit_enabled:
         return 0.0
-    _normalize_student_finance_fields(student)
     initialize_required_deposit(student)
     billed_total = _required_billed_total(student)
     paid_total = _required_paid_total(student)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -35,12 +34,7 @@ from app.services.import_export_service import (
     export_required_deposit_payment_history,
 )
 from app.services.payment_service import record_payment
-from app.utils.backup_utils import (
-    backup_sqlite_database,
-    list_sqlite_backups,
-    resolve_sqlite_db_path,
-    restore_sqlite_backup,
-)
+from app.utils.backup_utils import backup_sqlite_database, restore_sqlite_backup
 
 
 def setup_basic():
@@ -1949,21 +1943,6 @@ def test_restore_replaces_database_from_selected_backup(tmp_path):
     assert db_file.read_text() == "backup-db"
 
 
-def test_restore_with_official_relative_uri_targets_data_app_db(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.utils.backup_utils.project_root_path", lambda: tmp_path)
-    live_db = tmp_path / "data" / "app.db"
-    live_db.parent.mkdir(parents=True, exist_ok=True)
-    live_db.write_text("live-db")
-    backup_dir = tmp_path / "data" / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_file = backup_dir / "app_20260101_000000.db"
-    backup_file.write_text("backup-db")
-
-    restore_sqlite_backup("sqlite:///data/app.db", backup_file)
-
-    assert live_db.read_text() == "backup-db"
-
-
 def test_restore_route_rejects_invalid_backup_filename(client):
     res = client.post("/restore-backup/not_a_backup.txt", follow_redirects=True)
 
@@ -1984,115 +1963,37 @@ def test_restore_route_restores_selected_backup(app, client, tmp_path):
     res = client.post(f"/restore-backup/{backup_file.name}", follow_redirects=True)
 
     assert res.status_code == 200
-    assert b"Backup restored from app_20260101_000000.db." in res.data
+    assert b"Backup restored." in res.data
     assert db_file.read_text() == "backup-db"
-    emergency = sorted(backup_dir.glob("pre_restore_*.db"))
-    assert emergency
-    assert emergency[-1].read_text() == "live-db"
 
 
-def test_restore_route_rejects_non_sqlite_database(app, client):
-    app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://example/testdb"
-    res = client.post("/restore-backup/app_20260101_000000.db", follow_redirects=True)
-    assert res.status_code == 200
-    assert b"Restore is only supported for sqlite file databases." in res.data
-
-
-def test_restore_route_missing_live_db_shows_restore_specific_error(app, client, tmp_path):
-    db_file = tmp_path / "missing_live.db"
-    backup_dir = tmp_path / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_file = backup_dir / "app_20260101_000000.db"
-    backup_file.write_text("backup-db")
-
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
-    res = client.post(f"/restore-backup/{backup_file.name}", follow_redirects=True)
-
-    assert res.status_code == 200
-    assert b"Restore failed. Live database file could not be located." in res.data
-    assert b"Backup creation failed. Ensure the sqlite database file exists." not in res.data
-
-
-def test_restore_route_records_attempt_audit(session, app, client, tmp_path):
-    db_file = tmp_path / "app.db"
-    db_file.write_text("live-db")
-    backup_dir = tmp_path / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_file = backup_dir / "app_20260101_000000.db"
-    backup_file.write_text("backup-db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
-
-    client.post(f"/restore-backup/{backup_file.name}", follow_redirects=True)
-
-    audit = AuditLog.query.filter_by(action="backup_restore_attempt").order_by(AuditLog.id.desc()).first()
-    assert audit is not None
-    assert "result=success" in audit.details
-    assert backup_file.name in audit.details
-
-
-def test_restore_route_handles_filesystem_error_with_restore_specific_message(app, client, tmp_path, monkeypatch):
-    db_file = tmp_path / "app.db"
-    db_file.write_text("live-db")
-    backup_dir = tmp_path / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_file = backup_dir / "app_20260101_000000.db"
-    backup_file.write_text("backup-db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
-
-    import app.routes.web as web_routes
-
-    def _boom(*args, **kwargs):
-        raise OSError("disk issue")
-
-    monkeypatch.setattr(web_routes, "restore_sqlite_backup", _boom)
-    res = client.post(f"/restore-backup/{backup_file.name}", follow_redirects=True)
-    assert res.status_code == 200
-    assert b"Restore failed due to filesystem error." in res.data
-    assert b"Backup creation failed. Ensure the sqlite database file exists." not in res.data
-
-
-def test_create_backup_route_creates_file_in_data_backups(app, client, tmp_path, monkeypatch):
+def test_create_backup_route_creates_file_in_instance_data_backups(app, client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db_file = tmp_path / "data" / "app.db"
+    db_file = tmp_path / "instance" / "data" / "app.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
     db_file.write_text("live-db")
 
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
     res = client.post("/create-backup", follow_redirects=True)
 
     assert res.status_code == 200
     assert b"Backup created:" in res.data
-    backups = sorted((tmp_path / "data" / "backups").glob("app_*.db"))
+    backups = sorted((tmp_path / "instance" / "data" / "backups").glob("app_*.db"))
     assert len(backups) == 1
 
 
 def test_dashboard_lists_backups_after_manual_creation(app, client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db_file = tmp_path / "data" / "app.db"
+    db_file = tmp_path / "instance" / "data" / "app.db"
     db_file.parent.mkdir(parents=True, exist_ok=True)
     db_file.write_text("live-db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///instance/data/app.db"
 
     client.post("/create-backup", follow_redirects=True)
     page = client.get("/")
-    backup_names = [p.name.encode() for p in (tmp_path / "data" / "backups").glob("app_*.db")]
+    backup_names = [p.name.encode() for p in (tmp_path / "instance" / "data" / "backups").glob("app_*.db")]
     assert backup_names
     assert any(name in page.data for name in backup_names)
-
-
-def test_dashboard_shows_no_backups_only_when_empty(app, client, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    db_file = tmp_path / "data" / "app.db"
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-    db_file.write_text("live-db")
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_file}"
-
-    page_empty = client.get("/")
-    assert b"No backups found." in page_empty.data
-
-    client.post("/create-backup", follow_redirects=True)
-    page_with_backup = client.get("/")
-    assert b"No backups found." not in page_with_backup.data
 
 
 def test_create_backup_route_rejects_non_sqlite_database(app, client):
@@ -2228,69 +2129,8 @@ def test_navigation_order_and_tabs(session, client):
     assert res.status_code == 200
     html = res.data.decode('utf-8')
     assert html.index('>Dashboard<') < html.index('>Daily Schedule<') < html.index('>Make-up Editor<')
-    assert '>Payment<' in html
-    assert '>Reports<' in html
-    assert '>Payments Tracker<' not in html
-    assert '>Weekly Reports<' not in html
-    assert '>Export Reports<' not in html
     assert 'Import' not in html
     assert 'Admin Attendance</a>' not in html
-
-
-def test_branding_uses_skinnerbox_name(session, client):
-    res = client.get('/')
-    assert res.status_code == 200
-    assert b"SkinnerBox Children's Center" in res.data
-
-
-def test_payment_page_renders_consolidated_header_and_sections(session, client):
-    res = client.get('/payments')
-    assert res.status_code == 200
-    assert b"Record a payment and track payment history" in res.data
-    assert b"Record Payment" in res.data
-    assert b"Payment History" in res.data
-
-
-def test_payment_page_preserves_record_search_and_edit_access(session, client):
-    s, _ = setup_basic()
-    admin = AdminStaff(name="P Admin")
-    db.session.add(admin)
-    db.session.commit()
-
-    post_res = client.post(
-        "/payments",
-        data={
-            "action": "record_payment",
-            "payment_date": "2026-01-10",
-            "client_guardian_name": "Consolidated Guardian",
-            "student_id": str(s.id),
-            "purpose": "Therapy",
-            "billing_period_start": "2026-01-01",
-            "billing_period_end": "2026-01-15",
-            "total_hours_rendered": "2",
-            "amount": "500",
-            "received_by_admin_id": str(admin.id),
-            "mode_of_transfer": "Cash",
-        },
-        follow_redirects=True,
-    )
-    assert post_res.status_code == 200
-    assert b"Payment recorded" in post_res.data
-
-    list_res = client.get("/payments?view=active&month=1&year=2026&q=Consolidated")
-    assert b"Consolidated Guardian" in list_res.data
-    assert b"Edit" in list_res.data
-
-
-def test_reports_page_renders_consolidated_sections_and_preserves_features(session, client):
-    setup_basic()
-    res = client.get('/reports?date=2026-01-05')
-    assert res.status_code == 200
-    assert b"Generate and export reports" in res.data
-    assert b"Weekly Reports" in res.data
-    assert b"Export Reports" in res.data
-    assert b"Archive This Week" in res.data
-    assert b"Attendance Summary" in res.data
 
 
 def test_admin_attendance_is_available_in_dashboard(session, client):
@@ -2363,7 +2203,7 @@ def test_dashboard_quick_links_block_renders_expected_destinations(session, clie
     assert b'Daily Schedule' in res.data
     assert b'Make-up Editor' in res.data
     assert b'Billing' in res.data
-    assert b'Payment' in res.data
+    assert b'Payment Ledger' in res.data
 
 
 def test_payment_ledger_search_ui_shows_summary_and_clear_link(session, client):
@@ -2417,90 +2257,6 @@ def test_student_can_be_marked_no_required_deposit(session, client):
     assert student.required_deposit_enabled is False
 
 
-def test_student_can_be_marked_no_assessment_deposit(session, client):
-    res = client.post('/master-data/students', data={
-        'action': 'create',
-        'name': 'No Assessment Student',
-        'contract_hours_per_week': '3',
-        'required_deposit_enabled': '1',
-        'assessment_deposit_enabled': '0',
-        'overpayment_credit': '0',
-        'active': '1',
-    }, follow_redirects=True)
-    assert res.status_code == 200
-    student = Student.query.filter_by(name='No Assessment Student').first()
-    assert student is not None
-    assert student.assessment_deposit_enabled is False
-
-
-def test_turning_off_assessment_deposit_preserves_existing_assessment_totals(session, client):
-    s, _ = setup_basic()
-    s.assessment_deposit_total = 5000
-    s.assessment_deposit_billed = 2500
-    s.assessment_deposit_paid = 1500
-    db.session.commit()
-
-    res = client.post('/master-data/students', data={
-        'action': 'edit',
-        'student_id': str(s.id),
-        'name': s.name,
-        'contract_hours_per_week': str(s.contract_hours_per_week),
-        'required_deposit_enabled': '1',
-        'assessment_deposit_enabled': '0',
-        'overpayment_credit': str(s.overpayment_credit),
-        'active': '1',
-    }, follow_redirects=True)
-    assert res.status_code == 200
-    db.session.refresh(s)
-    assert s.assessment_deposit_enabled is False
-    assert s.assessment_deposit_total == 5000
-    assert s.assessment_deposit_billed == 2500
-    assert s.assessment_deposit_paid == 1500
-
-
-def test_turning_off_required_deposit_preserves_existing_required_totals(session, client):
-    s, _ = setup_basic()
-    s.required_deposit_total = 6600
-    s.required_deposit_billed = 2200
-    s.required_deposit_paid = 1000
-    db.session.commit()
-
-    res = client.post('/master-data/students', data={
-        'action': 'edit',
-        'student_id': str(s.id),
-        'name': s.name,
-        'contract_hours_per_week': str(s.contract_hours_per_week),
-        'required_deposit_enabled': '0',
-        'assessment_deposit_enabled': '1',
-        'overpayment_credit': str(s.overpayment_credit),
-        'active': '1',
-    }, follow_redirects=True)
-    assert res.status_code == 200
-    db.session.refresh(s)
-    assert s.required_deposit_enabled is False
-    assert s.required_deposit_total == 6600
-    assert s.required_deposit_billed == 2200
-    assert s.required_deposit_paid == 1000
-
-
-def test_policy_change_writes_audit_log(session, client):
-    s, _ = setup_basic()
-    res = client.post('/master-data/students', data={
-        'action': 'edit',
-        'student_id': str(s.id),
-        'name': s.name,
-        'contract_hours_per_week': str(s.contract_hours_per_week),
-        'required_deposit_enabled': '0',
-        'assessment_deposit_enabled': '0',
-        'overpayment_credit': str(s.overpayment_credit),
-        'active': '1',
-    }, follow_redirects=True)
-    assert res.status_code == 200
-    actions = {a.action for a in AuditLog.query.filter(AuditLog.action.like("student_%_deposit_policy_changed")).all()}
-    assert "student_required_deposit_policy_changed" in actions
-    assert "student_assessment_deposit_policy_changed" in actions
-
-
 def test_billing_skips_required_deposit_when_disabled(session):
     s, _ = setup_basic()
     s.required_deposit_enabled = False
@@ -2519,24 +2275,6 @@ def test_required_deposit_ui_shows_policy_options(session, client):
     assert res.status_code == 200
     assert b'With Required Deposit' in res.data
     assert b'No Required Deposit' in res.data
-    assert b'With Assessment Deposit' in res.data
-    assert b'No Assessment Deposit' in res.data
-    assert b'Deposit policy changes affect <em>future</em> charging only' in res.data
-
-
-def test_master_students_rejects_negative_finance_inputs(session, client):
-    res = client.post('/master-data/students', data={
-        'action': 'create',
-        'name': 'Bad Finance Student',
-        'contract_hours_per_week': '-1',
-        'required_deposit_enabled': '1',
-        'assessment_deposit_enabled': '1',
-        'overpayment_credit': '0',
-        'active': '1',
-    }, follow_redirects=True)
-    assert res.status_code == 200
-    assert b'cannot be negative' in res.data
-    assert Student.query.filter_by(name='Bad Finance Student').first() is None
 
 
 def test_payment_create_in_archived_month_marks_archive_outdated(session, client):
